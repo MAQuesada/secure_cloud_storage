@@ -1,0 +1,31 @@
+[project]
+name = "secure-cloud-storage"
+version = "0.1.0"
+description = "Secure cloud storage project"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv>=1.0",
+    "cryptography>=42.0",
+    "click>=8.1",
+    "streamlit>=1.28",
+]
+
+[project.scripts]
+secure-cloud-storage = "secure_cloud_storage.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/secure_cloud_storage"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
