@@ -44,7 +44,7 @@ def secure_overwrite_file(path: os.PathLike[str]) -> None:
 def encrypt_bytes(
     key: bytes, plaintext: bytes, algorithm: str, metadata: dict
 ) -> bytes:
-    """Encrypt plaintext using the specified algorithm. For AESGCM and CHACHA20 it will used the metada to encrypt too.
+    """Encrypt plaintext using the specified algorithm. For AESGCM it will used the metadata to encrypt too.
     Returns nonce + ciphertext + tag (single blob)."""
     if len(key) != KEY_BYTES:
         raise ValueError(f"Key must be {KEY_BYTES} bytes")
