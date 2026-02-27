@@ -17,9 +17,9 @@ This document describes the **encryption algorithm implementation** of the Secur
 
 | Types | Real Name | Key size | Nonce size | ¿AEAD? | returned blob |
 |-------|-----------|----------|------------|--------|---------------|
-| `fernet` | Fernet / AES-CBC+HMAC | 32 bytes in base 64 safe url | NO | NO | `fernet|aad|ciphertext` |
-| `aesgcm` | AES-GCM | 32 bytes | 12 bytes | Yes | `aesgcm|aad|<nonce>ciphertext` |
-| `chacha20` | ChaCha20-poly1305 | 32 bytes | 12 bytes | Yes | `chacha20|aad|<nonce>ciphertext` |
+| `fernet` | Fernet / AES-CBC+HMAC | 32 bytes in base 64 safe url | NO | NO | `fernet\|aad\|ciphertext` |
+| `aesgcm` | AES-GCM | 32 bytes | 12 bytes | Yes | `aesgcm\|aad\|<nonce>ciphertext` |
+| `chacha20` | ChaCha20-poly1305 | 32 bytes | 12 bytes | Yes | `chacha20\|aad\|<nonce>ciphertext` |
 
 The metadata employed for the AAD consists of two fields: `algorithm` and `encryption_mode`.
 
