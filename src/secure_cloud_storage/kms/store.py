@@ -25,6 +25,17 @@ SESSIONS_FILE = "sessions.json"
 SESSION_SALT_FILE = ".session_salt"
 MK_FILENAME = "mk.enc"
 
+DEFAULT_ENCRYPTED_ALG_LOGIN = "fernet"
+DEFAULT_METADATA_LOGIN = {
+    "algorithm": DEFAULT_ENCRYPTED_ALG_LOGIN,
+    "encryption_mode": "sse",
+}
+DEFAULT_ENC_ALG_SHARED_FOLDER = "fernet"
+DEFAULT_METADATA_SHARED_FOLDER = {
+    "algorithm": DEFAULT_ENC_ALG_SHARED_FOLDER,
+    "encryption_mode": "sse",
+}
+
 
 class KMSError(Exception):
     """Raised when a KMS operation fails (auth, not found, etc.)."""
@@ -79,13 +90,15 @@ class KMS:
         user_id = rec["user_id"]
         mk_enc = bytes.fromhex(rec["mk_enc_hex"])
         key = self._derive_session_key(token)
-        mk = decrypt_bytes(key, mk_enc)
+        mk,_ = decrypt_bytes(key, mk_enc)
         return user_id, mk
 
     def _save_session(self, token: str, user_id: str, mk: bytes) -> None:
         """Persist session: MK encrypted with key derived from token."""
         key = self._derive_session_key(token)
-        mk_enc = encrypt_bytes(key, mk)
+        mk_enc = encrypt_bytes(
+            key, mk, DEFAULT_ENCRYPTED_ALG_LOGIN, DEFAULT_METADATA_LOGIN
+        )
         sessions = self._read_json(self._sessions_path)
         sessions[token] = {"user_id": user_id, "mk_enc_hex": mk_enc.hex()}
         self._write_json(self._sessions_path, sessions)
@@ -120,7 +133,9 @@ class KMS:
         mk = bytearray(secrets.token_bytes(KEY_BYTES))
         try:
             key = self._derive_key(password, salt)
-            mk_enc = encrypt_bytes(key, bytes(mk))
+            mk_enc = encrypt_bytes(
+                key, bytes(mk), DEFAULT_ENCRYPTED_ALG_LOGIN, DEFAULT_METADATA_LOGIN
+            )
             user_dir = self._store_dir / user_id
             user_dir.mkdir(parents=True, exist_ok=True)
             mk_path = user_dir / MK_FILENAME
@@ -154,7 +169,8 @@ class KMS:
         with open(mk_path, "rb") as f:
             mk_enc = f.read()
         try:
-            mk = bytearray(decrypt_bytes(key, mk_enc))
+            plaintext,_ = decrypt_bytes(key, mk_enc)
+            mk = bytearray(plaintext)
         except Exception:
             raise KMSError("Invalid username or password")
         token = secrets.token_urlsafe(32)
@@ -240,7 +256,9 @@ class KMS:
         mk = self.get_key_for_token(token)
         folder_id = uuid.uuid4().hex
         fk = os.urandom(KEY_BYTES)
-        fk_enc = encrypt_bytes(mk, fk)
+        fk_enc = encrypt_bytes(
+            mk, fk, DEFAULT_ENC_ALG_SHARED_FOLDER, DEFAULT_METADATA_SHARED_FOLDER
+        )
         folders = self._read_json(self._shared_path)
         folders[folder_id] = {
             "members": [user_id],
@@ -274,9 +292,12 @@ class KMS:
         if user_id not in members or user_id not in fk_encrypted:
             raise KMSError("Not a member of this shared folder")
         fk_enc = bytes.fromhex(fk_encrypted[user_id])
-        return decrypt_bytes(mk, fk_enc)
+        fk, _ = decrypt_bytes(mk, fk_enc)
+        return fk
 
-    def invite_member(self, creator_token: str, folder_id: str, invitee_token: str) -> None:
+    def invite_member(
+        self, creator_token: str, folder_id: str, invitee_token: str
+    ) -> None:
         """Add invitee to shared folder: decrypt FK with creator MK, encrypt with invitee MK."""
         creator_id = self.get_user_id_for_token(creator_token)
         invitee_id = self.get_user_id_for_token(invitee_token)
@@ -292,7 +313,12 @@ class KMS:
             return
         fk_enc_creator = meta["fk_encrypted"][creator_id]
         fk = decrypt_bytes(creator_mk, bytes.fromhex(fk_enc_creator))
-        fk_enc_invitee = encrypt_bytes(invitee_mk, fk)
+        fk_enc_invitee = encrypt_bytes(
+            invitee_mk,
+            fk,
+            DEFAULT_ENC_ALG_SHARED_FOLDER,
+            DEFAULT_METADATA_SHARED_FOLDER,
+        )
         meta.setdefault("members", []).append(invitee_id)
         meta.setdefault("fk_encrypted", {})[invitee_id] = fk_enc_invitee.hex()
         self._write_json(self._shared_path, folders)

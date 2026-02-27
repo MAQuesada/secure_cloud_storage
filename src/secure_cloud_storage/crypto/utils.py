@@ -1,9 +1,12 @@
 """Cryptographic helpers: secure memory/file wipe and AES-GCM encryption."""
 
+import base64
+import json
 import os
 from typing import Union
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 # AES-GCM uses 128-bit (16-byte) tags; key must be 256-bit for AES-256
 KEY_BYTES = 32
@@ -38,25 +41,79 @@ def secure_overwrite_file(path: os.PathLike[str]) -> None:
         os.fsync(f.fileno())
 
 
-def encrypt_bytes(key: bytes, plaintext: bytes) -> bytes:
-    """Encrypt plaintext with AES-256-GCM; returns nonce + ciphertext + tag (single blob)."""
+def encrypt_bytes(
+    key: bytes, plaintext: bytes, algorithm: str, metadata: dict
+) -> bytes:
+    """Encrypt plaintext using the specified algorithm. For AESGCM and CHACHA20 it will used the metada to encrypt too.
+    Returns nonce + ciphertext + tag (single blob)."""
     if len(key) != KEY_BYTES:
         raise ValueError(f"Key must be {KEY_BYTES} bytes")
-    nonce = os.urandom(NONCE_BYTES)
-    aes = AESGCM(key)
-    ct = aes.encrypt(nonce, plaintext, None)
-    return nonce + ct
+
+    # Encode metadata to aad
+    aad = json.dumps(metadata).encode()
+    blob = b""
+
+    # We select the algorithm and encrypt
+    if algorithm == "aesgcm":
+        nonce = os.urandom(NONCE_BYTES)
+        aes = AESGCM(key)
+        ciphertext = aes.encrypt(nonce, plaintext, aad)
+        blob = b"aesgcm|" + aad + b"|" + nonce + ciphertext
+
+    elif algorithm == "chacha20":
+        nonce = os.urandom(NONCE_BYTES)
+        cipher = ChaCha20Poly1305(key)
+        ciphertext = cipher.encrypt(nonce, plaintext, aad)
+        blob = b"chacha20|" + aad + b"|" + nonce + ciphertext
+
+    elif algorithm == "fernet":
+        # fernet needs a specified kind of key, so we modify the master_key
+        fernet_key = base64.urlsafe_b64encode(key)
+        f = Fernet(fernet_key)
+        ciphertext = f.encrypt(plaintext)
+        blob = b"fernet|" + aad + b"|" + ciphertext
+
+    else:
+        raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+    return blob
 
 
-def decrypt_bytes(key: bytes, blob: bytes) -> bytes:
-    """Decrypt a blob produced by encrypt_bytes (nonce + ciphertext + tag)."""
+def decrypt_bytes(key: bytes, blob: bytes) -> tuple[bytes, dict]:
+    """Decrypt a blob produced by encrypt_bytes using the algorithm specified on it (metadata + nonce + ciphertext + tag)."""
     if len(key) != KEY_BYTES:
         raise ValueError(f"Key must be {KEY_BYTES} bytes")
-    if (
-        len(blob) < NONCE_BYTES + 16
-    ):  # nonce + at least 16 bytes (tag + some ciphertext)
-        raise ValueError("Blob too short")
-    nonce = blob[:NONCE_BYTES]
-    ciphertext = blob[NONCE_BYTES:]
-    aes = AESGCM(key)
-    return aes.decrypt(nonce, ciphertext, None)
+
+    # We get the algorithm, metadata and the rest of the data
+    algorithm, rest = blob.split(b"|", 1)
+    aad_raw, payload = rest.split(b"|", 1)
+    metadata = json.loads(aad_raw.decode())
+
+    plaintext = None
+    # We select the algorithm
+    if algorithm == b"aesgcm":
+        if (len(blob) < NONCE_BYTES + 16):  # nonce + at least 16 bytes (tag + some ciphertext)
+            raise ValueError("Blob too short")
+        nonce = payload[:NONCE_BYTES]
+        ciphertext = payload[NONCE_BYTES:]
+        aes = AESGCM(key)
+        plaintext = aes.decrypt(nonce, ciphertext, aad_raw)
+
+    elif algorithm == b"chacha20":
+        if (len(blob) < NONCE_BYTES + 16):  # nonce + at least 16 bytes (tag + some ciphertext)
+            raise ValueError("Blob too short")
+        nonce = payload[:NONCE_BYTES]
+        ciphertext = payload[NONCE_BYTES:]
+        cipher = ChaCha20Poly1305(key)
+        plaintext = cipher.decrypt(nonce, ciphertext, aad_raw)
+
+    elif algorithm == b"fernet":
+        # fernet needs a specified kind of key, so we modify the master_key
+        fernet_key = base64.urlsafe_b64encode(key)
+        f = Fernet(fernet_key)
+        plaintext = f.decrypt(payload)
+
+    else:
+        raise ValueError("Unsupported algorithm")
+
+    return plaintext, metadata
