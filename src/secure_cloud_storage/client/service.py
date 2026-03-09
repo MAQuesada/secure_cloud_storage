@@ -61,7 +61,8 @@ class ClientService:
             )
             metadata = {
                 "algorithm": algorithm,
-                "encryption_mode": encryption_mode
+                "encryption_mode": encryption_mode,
+                "filename": filename,
                 # OJOOOOO -> MAYBE IT IS NECESSARY TO PUT KEY_ID HERE OR SOMETHING LIKE THAT IN THE FUTURE
             }
             data = encrypt_bytes(key, data, algorithm, metadata)
