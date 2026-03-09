@@ -21,7 +21,7 @@ This document describes the **encryption algorithm implementation** of the Secur
 | `aesgcm` | AES-GCM | 32 bytes | 12 bytes | Yes | `aesgcm\|aad\|<nonce>ciphertext` |
 | `chacha20` | ChaCha20-poly1305 | 32 bytes | 12 bytes | Yes | `chacha20\|aad\|<nonce>ciphertext` |
 
-The metadata employed for the AAD consists of two fields: `algorithm` and `encryption_mode`.
+The metadata employed for the AAD consists of two fields: `algorithm`, `encryption_mode` and `filename`.
 
 ## 3. Implementation
 
