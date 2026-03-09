@@ -238,15 +238,76 @@ def shared_set_name(ctx: click.Context, folder_id: str, name: str) -> None:
 
 @shared.command("invite")
 @click.argument("folder_id", type=str)
-@click.argument("invitee_token", type=str)
+@click.argument("username", type=str)
 @click.pass_context
-def shared_invite(ctx: click.Context, folder_id: str, invitee_token: str) -> None:
-    """Add a user to a shared folder. Invitee must be logged in; pass their token."""
+def shared_invite(ctx: click.Context, folder_id: str, username: str) -> None:
+    """Invite a user to the shared folder by username. They must run 'shared accept' to get access."""
     token = _require_token(ctx)
     app: ClientService = _get_ctx_obj(ctx)["app"]
     try:
-        app.invite_to_shared_folder(token, folder_id, invitee_token)
-        click.echo("Invite sent.")
+        app.invite_to_shared_folder(token, folder_id, username)
+        click.echo(f"Invite sent to {username}. They must accept to get access.")
+    except KMSError as e:
+        raise click.ClickException(str(e))
+
+
+@shared.command("accept")
+@click.argument("folder_id", type=str)
+@click.pass_context
+def shared_accept(ctx: click.Context, folder_id: str) -> None:
+    """Accept a shared folder invite. You get access immediately."""
+    token = _require_token(ctx)
+    app: ClientService = _get_ctx_obj(ctx)["app"]
+    try:
+        app.accept_invite(token, folder_id)
+        click.echo("Accepted. You now have access to the folder.")
+    except KMSError as e:
+        raise click.ClickException(str(e))
+
+
+@shared.command("pending")
+@click.pass_context
+def shared_pending(ctx: click.Context) -> None:
+    """List shared folders you are invited to but have not accepted yet."""
+    token = _require_token(ctx)
+    app: ClientService = _get_ctx_obj(ctx)["app"]
+    try:
+        pending = app.list_pending_invites(token)
+        if not pending:
+            click.echo("No pending invites.")
+            return
+        for p in pending:
+            click.echo(f"{p['folder_id']}  {p['name']}")
+    except KMSError as e:
+        raise click.ClickException(str(e))
+
+
+@shared.command("members")
+@click.argument("folder_id", type=str)
+@click.pass_context
+def shared_members(ctx: click.Context, folder_id: str) -> None:
+    """List members of a shared folder."""
+    token = _require_token(ctx)
+    app: ClientService = _get_ctx_obj(ctx)["app"]
+    try:
+        data = app.list_members(token, folder_id)
+        for m in data["members"]:
+            click.echo(f"{m['user_id']}  {m['username']}")
+    except KMSError as e:
+        raise click.ClickException(str(e))
+
+
+@shared.command("remove-member")
+@click.argument("folder_id", type=str)
+@click.argument("username", type=str)
+@click.pass_context
+def shared_remove_member(ctx: click.Context, folder_id: str, username: str) -> None:
+    """Remove a member from the shared folder (creator only)."""
+    token = _require_token(ctx)
+    app: ClientService = _get_ctx_obj(ctx)["app"]
+    try:
+        app.remove_member(token, folder_id, username)
+        click.echo("Member removed.")
     except KMSError as e:
         raise click.ClickException(str(e))
 
@@ -267,7 +328,11 @@ def help_cmd() -> None:
     click.echo("  shared create [--name <name>]   Create shared folder (optional name)")
     click.echo("  shared list                    List your shared folders (id + name)")
     click.echo("  shared set-name <folder_id> <name>   Rename a shared folder")
-    click.echo("  shared invite <folder_id> <invitee_token>   Invite user to folder")
+    click.echo("  shared invite <folder_id> <username>   Invite user by username")
+    click.echo("  shared accept <folder_id>              Accept an invite (immediate access)")
+    click.echo("  shared pending                         List pending invites")
+    click.echo("  shared members <folder_id>            List folder members")
+    click.echo("  shared remove-member <folder_id> <username>   Remove member (creator only)")
     click.echo("  help                     This message")
 
 

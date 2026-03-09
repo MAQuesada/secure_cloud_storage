@@ -10,7 +10,7 @@ from typing import Any
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from secure_cloud_storage.config import KDF_ITERATIONS, KMS_STORE_DIR
+from secure_cloud_storage.config import KDF_ITERATIONS, KMS_STORE_DIR, get_app_key
 from secure_cloud_storage.crypto import (
     decrypt_bytes,
     encrypt_bytes,
@@ -251,7 +251,7 @@ class KMS:
     # ---------- Shared folders ----------
 
     def create_shared_folder(self, token: str, name: str | None = None) -> str:
-        """Create a shared folder; creator gets FK encrypted with their MK. Returns folder_id."""
+        """Create a shared folder; creator gets FK encrypted with their MK; FK also stored encrypted with app key for invitees. Returns folder_id."""
         user_id = self.get_user_id_for_token(token)
         mk = self.get_key_for_token(token)
         folder_id = uuid.uuid4().hex
@@ -259,10 +259,16 @@ class KMS:
         fk_enc = encrypt_bytes(
             mk, fk, DEFAULT_ENC_ALG_SHARED_FOLDER, DEFAULT_METADATA_SHARED_FOLDER
         )
+        app_key = get_app_key()
+        fk_app_enc = encrypt_bytes(
+            app_key, fk, DEFAULT_ENC_ALG_SHARED_FOLDER, DEFAULT_METADATA_SHARED_FOLDER
+        )
         folders = self._read_json(self._shared_path)
         folders[folder_id] = {
+            "creator_id": user_id,
             "members": [user_id],
             "fk_encrypted": {user_id: fk_enc.hex()},
+            "fk_app_enc": fk_app_enc.hex(),
             "name": (name or "").strip() or None,
         }
         self._write_json(self._shared_path, folders)
@@ -295,40 +301,118 @@ class KMS:
         fk, _ = decrypt_bytes(mk, fk_enc)
         return fk
 
-    def invite_member(
-        self, creator_token: str, folder_id: str, invitee_token: str
-    ) -> None:
-        """Add invitee to shared folder: decrypt FK with creator MK, encrypt with invitee MK."""
+    def _username_to_user_id(self, username: str) -> str:
+        """Resolve username to user_id. Raises KMSError if user does not exist."""
+        users = self._read_json(self._users_path)
+        if username not in users:
+            raise KMSError(f"User not found: {username}")
+        return users[username]["user_id"]
+
+    def _user_id_to_username(self, user_id: str) -> str | None:
+        """Resolve user_id to username for display."""
+        users = self._read_json(self._users_path)
+        for uname, rec in users.items():
+            if rec.get("user_id") == user_id:
+                return uname
+        return None
+
+    def invite_member(self, creator_token: str, folder_id: str, username: str) -> None:
+        """Add user to shared folder by username. User must accept the invite to get access (FK slot created on accept)."""
         creator_id = self.get_user_id_for_token(creator_token)
+        invitee_id = self._username_to_user_id(username)
+        folders = self._read_json(self._shared_path)
+        if folder_id not in folders:
+            raise KMSError("Shared folder not found")
+        meta = folders[folder_id]
+        creator = meta.get("creator_id") or (meta["members"][0] if meta.get("members") else None)
+        if creator != creator_id:
+            raise KMSError("Only the creator can invite members")
+        if invitee_id in meta.get("members", []):
+            raise KMSError("User is already a member")
+        meta.setdefault("members", []).append(invitee_id)
+        self._write_json(self._shared_path, folders)
+
+    def accept_invite(self, invitee_token: str, folder_id: str) -> None:
+        """Invitee accepts invite: app key decrypts FK, then FK is encrypted with invitee MK. Immediate access."""
         invitee_id = self.get_user_id_for_token(invitee_token)
-        creator_mk = self.get_key_for_token(creator_token)
         invitee_mk = self.get_key_for_token(invitee_token)
         folders = self._read_json(self._shared_path)
         if folder_id not in folders:
             raise KMSError("Shared folder not found")
         meta = folders[folder_id]
-        if creator_id not in meta.get("members", []):
-            raise KMSError("Only the creator can invite members")
-        if invitee_id in meta.get("members", []):
-            return
-        fk_enc_creator = meta["fk_encrypted"][creator_id]
-        fk = decrypt_bytes(creator_mk, bytes.fromhex(fk_enc_creator))
+        if invitee_id not in meta.get("members", []):
+            raise KMSError("You are not invited to this folder")
+        if invitee_id in meta.get("fk_encrypted", {}):
+            return  # Already accepted
+        fk_app_enc_hex = meta.get("fk_app_enc")
+        if not fk_app_enc_hex:
+            raise KMSError("Folder was created before app-key support; cannot accept. Ask creator to re-create the folder.")
+        app_key = get_app_key()
+        fk, _ = decrypt_bytes(app_key, bytes.fromhex(fk_app_enc_hex))
         fk_enc_invitee = encrypt_bytes(
             invitee_mk,
             fk,
             DEFAULT_ENC_ALG_SHARED_FOLDER,
             DEFAULT_METADATA_SHARED_FOLDER,
         )
-        meta.setdefault("members", []).append(invitee_id)
         meta.setdefault("fk_encrypted", {})[invitee_id] = fk_enc_invitee.hex()
         self._write_json(self._shared_path, folders)
 
+    def list_pending_invites(self, token: str) -> list[dict]:
+        """Return folders the user is invited to but has not yet accepted (no FK slot)."""
+        user_id = self.get_user_id_for_token(token)
+        folders = self._read_json(self._shared_path)
+        pending = []
+        for fid, meta in folders.items():
+            if user_id not in meta.get("members", []):
+                continue
+            if user_id in meta.get("fk_encrypted", {}):
+                continue
+            pending.append({"folder_id": fid, "name": meta.get("name") or fid})
+        return pending
+
+    def list_members(self, token: str, folder_id: str) -> dict:
+        """Return {members: [{user_id, username}, ...], you_are_creator: bool}. Creator is excluded from members. Caller must be a member."""
+        user_id = self.get_user_id_for_token(token)
+        folders = self._read_json(self._shared_path)
+        if folder_id not in folders:
+            raise KMSError("Shared folder not found")
+        meta = folders[folder_id]
+        if user_id not in meta.get("members", []):
+            raise KMSError("Not a member of this shared folder")
+        creator = meta.get("creator_id") or (meta["members"][0] if meta.get("members") else None)
+        members = [
+            {"user_id": uid, "username": self._user_id_to_username(uid) or uid}
+            for uid in meta.get("members", [])
+            if uid != creator
+        ]
+        return {"members": members, "you_are_creator": (creator == user_id)}
+
+    def remove_member(self, token: str, folder_id: str, username: str) -> None:
+        """Remove a member from the shared folder. Only the creator can remove members."""
+        creator_id = self.get_user_id_for_token(token)
+        to_remove_id = self._username_to_user_id(username)
+        folders = self._read_json(self._shared_path)
+        if folder_id not in folders:
+            raise KMSError("Shared folder not found")
+        meta = folders[folder_id]
+        creator = meta.get("creator_id") or (meta["members"][0] if meta.get("members") else None)
+        if creator != creator_id:
+            raise KMSError("Only the creator can remove members")
+        if to_remove_id == creator_id:
+            raise KMSError("Creator cannot remove themselves")
+        if to_remove_id not in meta.get("members", []):
+            raise KMSError("User is not a member")
+        meta["members"] = [m for m in meta["members"] if m != to_remove_id]
+        meta.get("fk_encrypted", {}).pop(to_remove_id, None)
+        self._write_json(self._shared_path, folders)
+
     def list_shared_folders(self, token: str) -> list[dict]:
-        """Return folder_ids and display names for which the user is a member."""
+        """Return folder_ids and display names for which the user has accepted (has key). Pending invites are not included."""
         user_id = self.get_user_id_for_token(token)
         folders = self._read_json(self._shared_path)
         return [
             {"folder_id": fid, "name": meta.get("name") or fid}
             for fid, meta in folders.items()
-            if user_id in meta.get("members", [])
+            if user_id in meta.get("fk_encrypted", {})
         ]

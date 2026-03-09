@@ -135,7 +135,23 @@ class ClientService:
         return self._kms.list_shared_folders(token)
 
     def invite_to_shared_folder(
-        self, creator_token: str, folder_id: str, invitee_token: str
+        self, creator_token: str, folder_id: str, username: str
     ) -> None:
-        """Add invitee to the shared folder (invitee must be logged in)."""
-        self._kms.invite_member(creator_token, folder_id, invitee_token)
+        """Invite a user to the shared folder by username. They must accept to get access."""
+        self._kms.invite_member(creator_token, folder_id, username)
+
+    def accept_invite(self, token: str, folder_id: str) -> None:
+        """Accept a shared folder invite. Gives immediate access (no creator needed)."""
+        self._kms.accept_invite(token, folder_id)
+
+    def list_pending_invites(self, token: str) -> list[dict]:
+        """List folders you are invited to but have not accepted yet."""
+        return self._kms.list_pending_invites(token)
+
+    def list_members(self, token: str, folder_id: str) -> dict:
+        """List members of a shared folder. Returns {members: [{user_id, username}, ...], you_are_creator: bool}. Creator is excluded from members."""
+        return self._kms.list_members(token, folder_id)
+
+    def remove_member(self, token: str, folder_id: str, username: str) -> None:
+        """Remove a member from the shared folder (creator only)."""
+        self._kms.remove_member(token, folder_id, username)
