@@ -12,6 +12,7 @@ from secure_cloud_storage.storage import StorageBackend
 from secure_cloud_storage.storage.backend import StorageError
 
 EncryptionMode = str  # "cse" | "sse"
+EncAlgMode = str # "aesgcm" | "chacha20" | "fernet"
 
 
 def _get_app() -> ClientService:
@@ -64,11 +65,18 @@ def _get_ctx_obj(ctx: click.Context) -> dict:
     default="cse",
     help="Encryption mode: cse (client-side) or sse (server-side).",
 )
+@click.option(
+    "--alg",
+    type=click.Choice(["aesgcm", "chacha20", "fernet"], case_sensitive=False),
+    default="aesgcm",
+    help="Encryption algorithm: aesgcm, chacha20 or fernet",
+)
 @click.pass_context
-def cli(ctx: click.Context, mode: str) -> None:
-    """Secure Cloud Storage — list, upload, download, delete; CSE/SSE; shared folders."""
+def cli(ctx: click.Context, mode: str, alg: str) -> None:
+    """Secure Cloud Storage — list, upload, download, delete; CSE/SSE; AES-GCM/ChaCha20/fernet; shared folders."""
     ctx.ensure_object(dict)
     ctx.obj["mode"] = mode.lower()
+    ctx.obj["alg"] = alg.lower()
     ctx.obj["app"] = _get_app()
 
 
@@ -134,9 +142,10 @@ def upload(ctx: click.Context, path: Path, folder_id: str | None) -> None:
     token = _require_token(ctx)
     obj = _get_ctx_obj(ctx)
     mode: EncryptionMode = obj["mode"]
+    alg: EncAlgMode = obj["alg"]
     app: ClientService = obj["app"]
     try:
-        file_id = app.upload_file(token, path, folder_id=folder_id, encryption_mode=mode)
+        file_id = app.upload_file(token, path, folder_id=folder_id, encryption_mode=mode, algorithm=alg)
         click.echo(f"Uploaded: {file_id}")
     except (KMSError, StorageError, FileNotFoundError) as e:
         raise click.ClickException(str(e))
@@ -247,6 +256,7 @@ def help_cmd() -> None:
     """Show help: commands, CSE/SSE mode, and usage."""
     click.echo("Secure Cloud Storage — CLI")
     click.echo("  --mode cse | sse   Encryption mode (default: cse)")
+    click.echo("  --alg aesgcm | chacha20 | fernet   Encryption algorithm (default: aesgcm)")
     click.echo("  register <user> <pass>   Register and log in")
     click.echo("  login <user> <pass>       Log in")
     click.echo("  logout                   Clear session")

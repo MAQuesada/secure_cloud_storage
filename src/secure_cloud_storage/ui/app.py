@@ -47,6 +47,8 @@ def _init_session() -> None:
         st.session_state.token = _read_token()
     if "mode" not in st.session_state:
         st.session_state.mode = "cse"
+    if "alg" not in st.session_state:
+        st.session_state.alg = "aesgcm"
     if "folder_id" not in st.session_state:
         st.session_state.folder_id = None
 
@@ -87,6 +89,7 @@ def _render_main(app: ClientService) -> None:
     """Main view: list files, upload, download, delete, shared folders."""
     token = st.session_state.token
     mode = st.session_state.mode
+    alg = st.session_state.alg
     folder_id = st.session_state.get("folder_id")
 
     st.sidebar.title("Secure Cloud Storage")
@@ -98,6 +101,9 @@ def _render_main(app: ClientService) -> None:
         pass
     st.sidebar.radio(
         "Encryption mode", ["cse", "sse"], key="mode", format_func=lambda x: x.upper()
+    )
+    st.sidebar.radio(
+        "Encryption algorithm", ["aesgcm", "chacha20", "fernet"], key="alg", format_func=lambda x: x.upper()
     )
     if st.sidebar.button("Log out"):
         _clear_token()
@@ -192,6 +198,7 @@ def _render_main(app: ClientService) -> None:
                     filename=uploaded.name,
                     folder_id=folder_id,
                     encryption_mode=mode,
+                    algorithm=alg
                 )
                 st.success(f"Uploaded: {file_id}")
                 st.rerun()

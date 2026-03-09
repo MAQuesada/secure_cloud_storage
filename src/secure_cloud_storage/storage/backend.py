@@ -11,6 +11,7 @@ from secure_cloud_storage.kms.store import KMSError
 from secure_cloud_storage.config import FILE_BIN_DIR
 
 EncryptionMode = Literal["cse", "sse"]
+EncAlgMode = Literal["aesgcm", "chacha20", "fernet"]
 BLOB_SUFFIX = ".blob"
 META_SUFFIX = ".meta"
 
@@ -24,7 +25,9 @@ class StorageError(Exception):
 class StorageBackend:
     """Storage layer over file_bin; uses token for identity and calls KMS for keys in SSE mode."""
 
-    def __init__(self, file_bin_dir: Path | None = None, kms: KMS | None = None) -> None:
+    def __init__(
+        self, file_bin_dir: Path | None = None, kms: KMS | None = None
+    ) -> None:
         self._root = Path(file_bin_dir) if file_bin_dir else FILE_BIN_DIR
         self._kms = kms
         self._root.mkdir(parents=True, exist_ok=True)
@@ -62,13 +65,23 @@ class StorageBackend:
                 try:
                     with open(p, encoding="utf-8") as f:
                         meta = json.load(f)
-                    result.append({
-                        "file_id": file_id,
-                        "filename": meta.get("filename", file_id),
-                        "encryption_mode": meta.get("encryption_mode") or "cse",
-                    })
+                    result.append(
+                        {
+                            "file_id": file_id,
+                            "filename": meta.get("filename", file_id),
+                            "encryption_mode": meta.get("encryption_mode") or "cse",
+                            "algorithm_mode": meta.get("algorithm_mode") or "aesgcm",
+                        }
+                    )
                 except (json.JSONDecodeError, OSError):
-                    result.append({"file_id": file_id, "filename": file_id, "encryption_mode": "cse"})
+                    result.append(
+                        {
+                            "file_id": file_id,
+                            "filename": file_id,
+                            "encryption_mode": "cse",
+                            "algorithm_mode": "aesgcm",
+                        }
+                    )
         return result
 
     def upload(
@@ -79,6 +92,7 @@ class StorageBackend:
         folder_id: str | None = None,
         filename: str | None = None,
         encryption_mode: EncryptionMode = "cse",
+        algorithm: EncAlgMode = "aesgcm",
     ) -> None:
         """Store data. In CSE mode data is already encrypted; in SSE mode we encrypt here using KMS."""
         base = self._base_dir(token, folder_id)
@@ -90,13 +104,27 @@ class StorageBackend:
                 key = self._kms.get_folder_key(token, folder_id)
             else:
                 key = self._kms.get_key_for_token(token)
-            data = encrypt_bytes(key, data)
+
+            metadata = {
+                "algorithm": algorithm,
+                "encryption_mode": encryption_mode,
+                "filename": filename,
+                # OJOOOOO -> MAYBE IT IS NECESSARY TO PUT KEY_ID HERE OR SOMETHING LIKE THAT IN THE FUTURE
+            }
+            data = encrypt_bytes(key, data, algorithm, metadata)
         blob_path = base / f"{file_id}{BLOB_SUFFIX}"
         meta_path = base / f"{file_id}{META_SUFFIX}"
         with open(blob_path, "wb") as f:
             f.write(data)
         with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump({"filename": filename or file_id, "encryption_mode": encryption_mode}, f)
+            json.dump(
+                {
+                    "filename": filename or file_id,
+                    "encryption_mode": encryption_mode,
+                    "algorithm_mode": algorithm,
+                },
+                f,
+            )
 
     def download(
         self,
@@ -127,7 +155,7 @@ class StorageBackend:
                 key = self._kms.get_folder_key(token, folder_id)
             else:
                 key = self._kms.get_key_for_token(token)
-            data = decrypt_bytes(key, data)
+            data, _ = decrypt_bytes(key, data)
         return (data, mode)
 
     def delete(self, token: str, file_id: str, folder_id: str | None = None) -> None:

@@ -11,6 +11,7 @@ from secure_cloud_storage.storage import StorageBackend
 from secure_cloud_storage.storage.backend import StorageError
 
 EncryptionMode = Literal["cse", "sse"]
+EncAlgMode = Literal["aesgcm", "chacha20", "fernet"]
 
 
 class ClientService:
@@ -43,6 +44,7 @@ class ClientService:
         filename: str | None = None,
         folder_id: str | None = None,
         encryption_mode: EncryptionMode = "cse",
+        algorithm: EncAlgMode = "aesgcm"
     ) -> str:
         """Upload a file. Returns the assigned file_id."""
         path = Path(local_path)
@@ -57,7 +59,13 @@ class ClientService:
                 if not folder_id
                 else self._kms.get_folder_key(token, folder_id)
             )
-            data = encrypt_bytes(key, data)
+            metadata = {
+                "algorithm": algorithm,
+                "encryption_mode": encryption_mode,
+                "filename": filename,
+                # OJOOOOO -> MAYBE IT IS NECESSARY TO PUT KEY_ID HERE OR SOMETHING LIKE THAT IN THE FUTURE
+            }
+            data = encrypt_bytes(key, data, algorithm, metadata)
             self._storage.upload(
                 token,
                 file_id,
@@ -65,6 +73,7 @@ class ClientService:
                 folder_id=folder_id,
                 filename=display_name,
                 encryption_mode="cse",
+                algorithm=algorithm
             )
         else:
             self._storage.upload(
@@ -74,6 +83,7 @@ class ClientService:
                 folder_id=folder_id,
                 filename=display_name,
                 encryption_mode="sse",
+                algorithm=algorithm
             )
         return file_id
 
@@ -103,7 +113,7 @@ class ClientService:
                 if not folder_id
                 else self._kms.get_folder_key(token, folder_id)
             )
-            data = decrypt_bytes(key, data)
+            data,_ = decrypt_bytes(key, data)
         return (data, mode)
 
     def delete_file(
