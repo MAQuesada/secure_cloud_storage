@@ -10,6 +10,8 @@ from secure_cloud_storage.kms import KMS
 from secure_cloud_storage.kms.store import KMSError
 from secure_cloud_storage.config import FILE_BIN_DIR
 
+from cryptography.exceptions import InvalidTag
+
 EncryptionMode = Literal["cse", "sse"]
 EncAlgMode = Literal["aesgcm", "chacha20", "fernet"]
 BLOB_SUFFIX = ".blob"
@@ -106,9 +108,9 @@ class StorageBackend:
                 key = self._kms.get_key_for_token(token)
 
             metadata = {
-                "algorithm": algorithm,
+                "filename": filename or file_id,
                 "encryption_mode": encryption_mode,
-                "filename": filename,
+                "algorithm_mode": algorithm,
                 # OJOOOOO -> MAYBE IT IS NECESSARY TO PUT KEY_ID HERE OR SOMETHING LIKE THAT IN THE FUTURE
             }
             data = encrypt_bytes(key, data, algorithm, metadata)
@@ -139,11 +141,15 @@ class StorageBackend:
         if not blob_path.is_file():
             raise StorageError(f"File not found: {file_id}")
         mode: EncryptionMode = "cse"
+        alg: EncAlgMode
+        file = ""
         if meta_path.is_file():
             try:
                 with open(meta_path, encoding="utf-8") as f:
                     meta = json.load(f)
                 mode = meta.get("encryption_mode") or "cse"
+                file = meta.get("filename")
+                alg = meta.get("algorithm_mode")
             except (json.JSONDecodeError, OSError):
                 pass
         with open(blob_path, "rb") as f:
@@ -155,8 +161,35 @@ class StorageBackend:
                 key = self._kms.get_folder_key(token, folder_id)
             else:
                 key = self._kms.get_key_for_token(token)
-            data, _ = decrypt_bytes(key, data)
-        return (data, mode)
+
+            try:
+                data, metadata = decrypt_bytes(key, data)
+            except InvalidTag:
+                self.delete(token, file_id, folder_id)
+                raise StorageError(
+                    "File integrity verification failed (AAD/authentication tag mismatch)"
+                )
+
+            # If it doesnt raise the exception, the file metadata is correct
+            file_aad = metadata.get("filename")
+            encryp_aad = metadata.get("encryption_mode")
+            alg_aad = metadata.get("algorithm_mode")
+            if file is None or file != file_aad:
+                self.delete(token, file_id, folder_id)
+                raise StorageError(
+                    f"File .meta was modified in name -> .meta: {file}; Verified: {file_aad}"
+                )
+            if mode is None or mode != encryp_aad:
+                self.delete(token, file_id, folder_id)
+                raise StorageError(
+                    f"File .meta was modified in mode -> .meta: {mode}; Verified: {encryp_aad}"
+                )
+            if alg is None or alg != alg_aad:
+                self.delete(token, file_id, folder_id)
+                raise StorageError(
+                    f"File .meta was modified in encryption algorithm-> .meta: {alg}; Verified: {alg_aad}"
+                )
+        return (data, mode, alg, file)
 
     def delete(self, token: str, file_id: str, folder_id: str | None = None) -> None:
         """Remove file blob and metadata. No key material involved."""

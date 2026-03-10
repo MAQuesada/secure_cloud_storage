@@ -10,6 +10,8 @@ from secure_cloud_storage.kms.store import KMSError
 from secure_cloud_storage.storage import StorageBackend
 from secure_cloud_storage.storage.backend import StorageError
 
+from cryptography.exceptions import InvalidTag
+
 EncryptionMode = Literal["cse", "sse"]
 EncAlgMode = Literal["aesgcm", "chacha20", "fernet"]
 
@@ -44,7 +46,7 @@ class ClientService:
         filename: str | None = None,
         folder_id: str | None = None,
         encryption_mode: EncryptionMode = "cse",
-        algorithm: EncAlgMode = "aesgcm"
+        algorithm: EncAlgMode = "aesgcm",
     ) -> str:
         """Upload a file. Returns the assigned file_id."""
         path = Path(local_path)
@@ -60,9 +62,9 @@ class ClientService:
                 else self._kms.get_folder_key(token, folder_id)
             )
             metadata = {
-                "algorithm": algorithm,
+                "filename": filename or file_id,
                 "encryption_mode": encryption_mode,
-                "filename": filename,
+                "algorithm_mode": algorithm,
                 # OJOOOOO -> MAYBE IT IS NECESSARY TO PUT KEY_ID HERE OR SOMETHING LIKE THAT IN THE FUTURE
             }
             data = encrypt_bytes(key, data, algorithm, metadata)
@@ -73,7 +75,7 @@ class ClientService:
                 folder_id=folder_id,
                 filename=display_name,
                 encryption_mode="cse",
-                algorithm=algorithm
+                algorithm=algorithm,
             )
         else:
             self._storage.upload(
@@ -83,7 +85,7 @@ class ClientService:
                 folder_id=folder_id,
                 filename=display_name,
                 encryption_mode="sse",
-                algorithm=algorithm
+                algorithm=algorithm,
             )
         return file_id
 
@@ -106,14 +108,42 @@ class ClientService:
         folder_id: str | None = None,
     ) -> tuple[bytes, str]:
         """Return (file contents, encryption_mode). Mode is read from file metadata for correct key."""
-        data, mode = self._storage.download(token, file_id, folder_id=folder_id)
+        data, mode, alg, file = self._storage.download(
+            token, file_id, folder_id=folder_id
+        )
         if mode == "cse":
             key = (
                 self._kms.get_key_for_token(token)
                 if not folder_id
                 else self._kms.get_folder_key(token, folder_id)
             )
-            data,_ = decrypt_bytes(key, data)
+            try:
+                data, metadata = decrypt_bytes(key, data)
+            except InvalidTag:
+                self.delete_file(token, file_id, folder_id)
+                raise StorageError(
+                    "File integrity verification failed (AAD/authentication tag mismatch)"
+                )
+
+            # If it doesnt raise the exception, the file metadata is correct
+            file_aad = metadata.get("filename")
+            encryp_aad = metadata.get("encryption_mode")
+            alg_aad = metadata.get("algorithm_mode")
+            if file is None or file != file_aad:
+                self.delete_file(token, file_id, folder_id)
+                raise StorageError(
+                    f"File .meta was modified in name -> .meta: {file}; Verified: {file_aad}"
+                )
+            if mode is None or mode != encryp_aad:
+                self.delete_file(token, file_id, folder_id)
+                raise StorageError(
+                    f"File .meta was modified in mode -> .meta: {mode}; Verified: {encryp_aad}"
+                )
+            if alg is None or alg != alg_aad:
+                self.delete_file(token, file_id, folder_id)
+                raise StorageError(
+                    f"File .meta was modified in encryption algorithm-> .meta: {alg}; Verified: {alg_aad}"
+                )
         return (data, mode)
 
     def delete_file(

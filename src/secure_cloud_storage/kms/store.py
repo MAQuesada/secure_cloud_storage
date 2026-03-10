@@ -27,13 +27,13 @@ MK_FILENAME = "mk.enc"
 
 DEFAULT_ENCRYPTED_ALG_LOGIN = "fernet"
 DEFAULT_METADATA_LOGIN = {
-    "algorithm": DEFAULT_ENCRYPTED_ALG_LOGIN,
     "encryption_mode": "sse",
+    "algorithm_mode": DEFAULT_ENCRYPTED_ALG_LOGIN,
 }
 DEFAULT_ENC_ALG_SHARED_FOLDER = "fernet"
 DEFAULT_METADATA_SHARED_FOLDER = {
-    "algorithm": DEFAULT_ENC_ALG_SHARED_FOLDER,
     "encryption_mode": "sse",
+    "algorithm_mode": DEFAULT_ENC_ALG_SHARED_FOLDER,
 }
 
 
