@@ -76,7 +76,7 @@ uv sync --frozen
 UV can run commands using the project's venv without activating it:
 
 ```bash
-uv run python src/secure_cloud_storage/main.py
+uv run python -m secure_cloud_storage --help
 uv run ruff check .
 ```
 
@@ -94,18 +94,26 @@ uv run python -m secure_cloud_storage list
 uv run python -m secure_cloud_storage upload <path> [--folder <folder_id>]
 uv run python -m secure_cloud_storage download <file_id> [-o <path>]
 uv run python -m secure_cloud_storage delete <file_id>
-uv run python -m secure_cloud_storage shared create
+uv run python -m secure_cloud_storage shared create [--name <name>]
 uv run python -m secure_cloud_storage shared list
+uv run python -m secure_cloud_storage shared set-name <folder_id> <name>
+uv run python -m secure_cloud_storage shared invite <folder_id> <username>
+uv run python -m secure_cloud_storage shared accept <folder_id>
+uv run python -m secure_cloud_storage shared pending
+uv run python -m secure_cloud_storage shared members <folder_id>
+uv run python -m secure_cloud_storage shared remove-member <folder_id> <username>
 uv run python -m secure_cloud_storage help
 ```
 
-Use `--mode cse` or `--mode sse` for encryption mode (default: cse).
+Use `--mode cse` or `--mode sse` for encryption mode (default: cse). Shared folders: only the creator can invite and remove members; invitees accept from **shared pending** to get access.
 
 **Streamlit UI:**
 
 ```bash
 uv run python -m secure_cloud_storage --ui
 ```
+
+Each browser tab has its own session, so you can run multiple users at once (e.g. one tab per user to test shared folders).
 
 Or use the installed script (after `uv sync`):
 
@@ -130,12 +138,14 @@ Scripts load variables from a `.env` file (copy `example.env` to `.env` and adju
 | `SECURE_STORAGE_DATA_ROOT` | Base directory for data (default: project root / `data`) |
 | `SECURE_STORAGE_KMS_DIR` | KMS store directory (default: `$DATA_ROOT/kms_store`) |
 | `SECURE_STORAGE_FILE_BIN` | File storage directory (default: `$DATA_ROOT/file_bin`) |
-| `SECURE_STORAGE_SESSION_FILE` | Session token file path |
+| `SECURE_STORAGE_SESSION_FILE` | Session token file path (CLI only; UI uses per-tab session) |
+| `SECURE_STORAGE_APP_KEY` | **Required for shared folders.** 64 hex chars (32 bytes). Used so invitees can accept without the creator online. Generate: `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `SECURE_STORAGE_KDF_ITERATIONS` | PBKDF2 iterations for key derivation (default: 600000) |
 
 ## Documentation
 
-Project documentation will go in the [`docs/`](docs/) folder as the project is developed.
+- [Design and basic implementation](docs/01_Design_and_basic_implementation.md) — architecture, key usage (MK, FK, APP_KEY), CSE/SSE, shared folder flow and security.
+- [Encryption algorithm](docs/02_Encryption_algorithm.md) — algorithm and metadata details.
 
 ## Python version
 
