@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 from secure_cloud_storage.client import ClientService
-from secure_cloud_storage.config import FILE_BIN_DIR, KMS_STORE_DIR, SESSION_FILE
+from secure_cloud_storage.config import FILE_BIN_DIR, KMS_STORE_DIR
 from secure_cloud_storage.kms import KMS
 from secure_cloud_storage.kms.store import KMSError
 from secure_cloud_storage.storage import StorageBackend
@@ -20,31 +20,10 @@ def _get_app() -> ClientService:
     return ClientService(kms=kms, storage=storage)
 
 
-def _read_token() -> str | None:
-    """Read session token from file (shared with CLI)."""
-    if not SESSION_FILE.is_file():
-        return None
-    try:
-        return SESSION_FILE.read_text().strip() or None
-    except OSError:
-        return None
-
-
-def _write_token(token: str) -> None:
-    """Persist session token to file."""
-    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SESSION_FILE.write_text(token)
-
-
-def _clear_token() -> None:
-    """Remove session file."""
-    if SESSION_FILE.is_file():
-        SESSION_FILE.unlink()
-
-
 def _init_session() -> None:
+    # Token only in session_state (no file): each browser tab has its own user; multiple sessions allowed.
     if "token" not in st.session_state:
-        st.session_state.token = _read_token()
+        st.session_state.token = None
     if "mode" not in st.session_state:
         st.session_state.mode = "cse"
     if "alg" not in st.session_state:
@@ -65,7 +44,6 @@ def _render_login(app: ClientService) -> bool:
                     try:
                         token = app.login(user, pwd)
                         st.session_state.token = token
-                        _write_token(token)
                         st.rerun()
                     except KMSError as e:
                         st.error(str(e))
@@ -78,7 +56,6 @@ def _render_login(app: ClientService) -> bool:
                     try:
                         token = app.register(r_user, r_pwd)
                         st.session_state.token = token
-                        _write_token(token)
                         st.rerun()
                     except KMSError as e:
                         st.error(str(e))
@@ -106,7 +83,6 @@ def _render_main(app: ClientService) -> None:
         "Encryption algorithm", ["aesgcm", "chacha20", "fernet"], key="alg", format_func=lambda x: x.upper()
     )
     if st.sidebar.button("Log out"):
-        _clear_token()
         st.session_state.token = None
         st.rerun()
 
@@ -133,20 +109,13 @@ def _render_main(app: ClientService) -> None:
 
     folder_id = st.session_state.folder_id
 
-    # Your token (so you can copy it and give it to someone who wants to invite you to a folder)
-    with st.sidebar.expander("Your token (for invites)"):
-        st.caption(
-            "Copy this and send it to the folder creator so they can invite you."
-        )
-        st.code(token, language=None)
-
     try:
         files = app.list_files(token, folder_id=folder_id)
     except (KMSError, StorageError) as e:
         st.error(str(e))
         return
 
-    st.subheader("Files" + (f" (shared: {folder_id})" if folder_id else " (personal)"))
+    st.subheader("Files")
     if not files:
         st.info("No files. Upload one below.")
     else:
@@ -226,9 +195,7 @@ def _render_main(app: ClientService) -> None:
     for f in shared_folders:
         st.sidebar.text(f"{f['name']} ({f['folder_id'][:8]}…)")
     with st.sidebar.expander("Invite to folder"):
-        st.caption(
-            "Select the folder and paste the invitee's token. They can copy it from 'Your token (for invites)' in their sidebar."
-        )
+        st.caption("Select the folder and enter the username to invite. They must accept to get access.")
         inv_folder_options = [f["name"] for f in shared_folders]
         inv_folder_ids = [f["folder_id"] for f in shared_folders]
         if not inv_folder_options:
@@ -238,18 +205,72 @@ def _render_main(app: ClientService) -> None:
             inv_folder = (
                 inv_folder_ids[inv_folder_options.index(inv_sel)] if inv_sel else None
             )
-            inv_token = st.text_input(
-                "Invitee token",
-                key="inv_token",
-                placeholder="Paste the token they sent you",
+            inv_username = st.text_input(
+                "Username to invite",
+                key="inv_username",
+                placeholder="e.g. alice",
             )
             if st.button("Invite", key="inv_btn"):
-                if inv_folder and inv_token:
+                if inv_folder and inv_username:
                     try:
-                        app.invite_to_shared_folder(token, inv_folder, inv_token)
-                        st.success("Invite sent.")
+                        app.invite_to_shared_folder(token, inv_folder, inv_username.strip())
+                        st.success(f"Invite sent to {inv_username}. They must accept.")
+                        st.rerun()
                     except KMSError as e:
                         st.error(str(e))
+
+    with st.sidebar.expander("Pending invites"):
+        try:
+            pending = app.list_pending_invites(token)
+        except KMSError:
+            pending = []
+        if not pending:
+            st.caption("No pending invites.")
+        else:
+            for p in pending:
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.caption(f"{p['name']} ({p['folder_id'][:8]}…)")
+                with col2:
+                    if st.button("Accept", key=f"accept_{p['folder_id']}"):
+                        try:
+                            app.accept_invite(token, p["folder_id"])
+                            st.success("Accepted.")
+                            st.rerun()
+                        except KMSError as e:
+                            st.error(str(e))
+
+    with st.sidebar.expander("Members / Remove"):
+        if not shared_folders:
+            st.caption("No shared folders.")
+        else:
+            mem_sel = st.selectbox(
+                "Folder",
+                [f["name"] for f in shared_folders],
+                key="members_folder_sel",
+            )
+            mem_fid = shared_folders[
+                [f["name"] for f in shared_folders].index(mem_sel)
+            ]["folder_id"]
+            try:
+                data = app.list_members(token, mem_fid)
+                members = data["members"]
+                you_are_creator = data["you_are_creator"]
+            except KMSError:
+                members = []
+                you_are_creator = False
+            for m in members:
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.caption(f"{m['username']} ({m['user_id'][:8]}…)")
+                with col2:
+                    if you_are_creator and st.button("Remove", key=f"remove_{mem_fid}_{m['user_id']}"):
+                        try:
+                            app.remove_member(token, mem_fid, m["username"])
+                            st.success("Removed.")
+                            st.rerun()
+                        except KMSError as e:
+                            st.error(str(e))
     with st.sidebar.expander("Rename shared folder"):
         if not shared_folders:
             st.caption("No shared folders.")

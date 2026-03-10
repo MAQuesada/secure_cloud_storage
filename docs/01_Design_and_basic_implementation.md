@@ -1,6 +1,6 @@
 # 01 — Design and basic implementation
 
-This document describes the **design and the implementation** of the Secure Cloud Storage system (first version): requirements, components, key usage (Master Key only).
+This document describes the **design and the implementation** of the Secure Cloud Storage system (first version): requirements, components, key usage (Master Key, Folder Key, Application Key for shared folders).
 
 ## 1. Requirements covered
 
@@ -15,7 +15,7 @@ This document describes the **design and the implementation** of the Secure Clou
 | KMS: key material; one **Master Key (MK)** per user in this version
 | User management: username + password
 | Basic CLI: login, list, upload, download, delete
-| Advanced CLI: `--mode cse\|sse`, shared folders (create, list, invite), help
+| Advanced CLI: `--mode cse\|sse`, shared folders (create, list, invite by username, accept, pending, members, remove-member), help
 | Secure deletion of keys: overwrite with zeros/random before delete
 | Shared folder: members see all files; encryption preserved on disk
 | Encryption mode stored per file (metadata); download uses stored mode
@@ -25,10 +25,12 @@ This document describes the **design and the implementation** of the Secure Clou
 | Key type | Description | Implemented in this version? |
 |----------|-------------|------------------------------|
 | **Master Key (MK)** | One per user. Used to encrypt/decrypt file data (and, in shared folders, to protect the Folder Key). Never stored in plain text; derived at login and provided via session token. | **Yes** |
+| **Folder Key (FK)** | One per shared folder. Encrypts all file data in that folder. Stored encrypted: under each member's MK and under the APP_KEY (see §5). | **Yes** |
+| **Application Key (APP_KEY)** | Single 32-byte key from env (`SECURE_STORAGE_APP_KEY`, 64 hex chars). Used only to encrypt/decrypt the FK when creating a folder and when an invitee accepts (creator need not be online). Loaded from `.env`. | **Yes** |
 | **Data Encryption Key (DEK)** | Per-file key used only to encrypt that file’s data. | **No** |
 | **Key Encryption Key (KEK)** | Key used to encrypt another key (e.g. to wrap a DEK). | **No** |
 
-In this version, **only the Master Key (MK)** is used and saved in the Key Management Service (KMS) component. File contents (and in shared folders, the Folder Key) are encrypted directly with the MK (or with the Folder Key, which is itself protected by each member’s MK). There is no DEK-per-file and no KEK layer; those can be added in a future version.
+In this version, the **Master Key (MK)** and the **Folder Key (FK)** are used. File contents in shared folders are encrypted with the FK; The FK is protected by each member's MK (and at creation/accept by the APP_KEY). There is no DEK-per-file and no KEK layer; those can be added in a future version.
 
 ## 2. How the Master Key (MK) is used
 
@@ -85,17 +87,23 @@ Everything runs in **one process** (no separate server process, no HTTP). The �
   - `users.json`: username → user_id, salt, path to `mk.enc`  
   - `<user_id>/mk.enc`: MK encrypted with password-derived key  
   - `sessions.json`: token → encrypted MK (for session persistence across restarts)  
-  - `shared_folders.json`: folder_id → members, FK encrypted per member  
+  - `shared_folders.json`: folder_id → members, creator_id, fk_encrypted per member, fk_app_enc (FK encrypted with APP_KEY)  
 - **Main operations:**  
   - `register(username, password)` → creates user, MK, stores encrypted MK, returns token  
   - `login(username, password)` → returns token; session (and optionally persisted session) holds MK  
   - `get_key_for_token(token)` → returns MK for that session (from memory or by decrypting from sessions.json)  
   - `get_user_id_for_token(token)`, `get_username_for_token(token)` → for storage path and UI display  
-  - `get_folder_key(token, folder_id)` → returns Folder Key for shared folder (user must be member)  
-  - `create_shared_folder(token)`, `invite_member(creator_token, folder_id, invitee_token)`, `list_shared_folders(token)`  
+  - `get_folder_key(token, folder_id)` → returns Folder Key for shared folder (user must have accepted; i.e. have FK slot)  
+  - `create_shared_folder(token)` → stores FK encrypted with creator's MK and with APP_KEY (`fk_app_enc`)  
+  - `invite_member(creator_token, folder_id, username)` → only creator; adds user to members by username (no FK slot yet)  
+  - `accept_invite(invitee_token, folder_id)` → invitee gets FK from `fk_app_enc` (APP_KEY), then FK encrypted with invitee's MK stored  
+  - `list_shared_folders(token)` → only folders where user has a FK slot (accepted); pending invites excluded  
+  - `list_pending_invites(token)` → folders where user is in members but has no FK slot  
+  - `list_members(token, folder_id)` → {members (excluding creator), you_are_creator}  
+  - `remove_member(token, folder_id, username)` → only creator; removes from members and FK slots (creator cannot remove self)  
   - `delete_user(username, password)`: verifies password, then secure wipe of MK and file removal  
 
-No DEK or KEK is used; only MK (and FK for shared folders, protected by MK).
+No DEK or KEK is used; only MK, FK, and APP_KEY (for shared-folder accept flow).
 
 ### 3.2 Storage (storage backend)
 
@@ -120,7 +128,7 @@ All key access is via KMS (token ± folder_id); no keys are passed in from the c
 - **Main operations:**  
   - `register`, `login`, `get_username`  
   - `list_files`, `upload_file`, `download_file`, `get_file_bytes`, `delete_file`  
-  - `create_shared_folder`, `list_shared_folders`, `invite_to_shared_folder`, `set_folder_name`  
+  - `create_shared_folder`, `list_shared_folders`, `invite_to_shared_folder` (by username), `accept_invite`, `list_pending_invites`, `list_members`, `remove_member`, `set_folder_name`  
 
 Upload uses the **current** session’s encryption mode (CSE or SSE) and stores it in file metadata. Download **always** uses the mode stored in the file’s metadata (so the correct key is used and the app can log “File downloaded correctly using &lt;MODE&gt;”).
 
@@ -131,7 +139,7 @@ Upload uses the **current** session’s encryption mode (CSE or SSE) and stores 
 - **Commands:**  
   - `register <username> -p <password>`, `login <username> -p <password>`, `logout`  
   - `list [--folder <id>]`, `upload <path> [--folder <id>]`, `download <file_id> [-o <path>] [--folder <id>]`, `delete <file_id> [--folder <id>]`  
-  - `shared create [--name <name>]`, `shared list`, `shared set-name <folder_id> <name>`, `shared invite <folder_id> <invitee_token>`  
+  - `shared create [--name <name>]`, `shared list`, `shared set-name <folder_id> <name>`, `shared invite <folder_id> <username>`, `shared accept <folder_id>`, `shared pending`, `shared members <folder_id>`, `shared remove-member <folder_id> <username>`  
   - `help`  
 - **Options:** `--mode cse | sse` (default: cse) for **upload**; download ignores this and uses the mode stored in file metadata.  
 - Session token is stored in a file (e.g. `data/.session`) so later invocations can use it.
@@ -139,7 +147,7 @@ Upload uses the **current** session’s encryption mode (CSE or SSE) and stores 
 ### 3.5 UI (Streamlit)
 
 - **Entry:** `uv run python -m secure_cloud_storage --ui`.  
-- **Behaviour:** Provides all core functionalities available in the CLI, including user login and registration; listing of personal and shared folders; file upload and download; file deletion; and shared folder management (create, list, invite users, and rename). In addition, the interface extends the CLI by exposing contextual information not directly visible there. For file uploads, it allows explicit selection between CSS and SSE; and clearly indicates where the encryption is performed. For downloads, it displays a confirmation message specifying the encryption mode used. The shared folder workflow is also enhanced by making the sharing context more explicit, including visibility of the user’s invitation token (“Your token (for invites)”) and clearer feedback during invite and access operations.
+- **Behaviour:** Provides all core functionalities available in the CLI, including user login and registration; listing of personal and shared folders (only folders the user has accepted); file upload and download; file deletion; and shared folder management (create, invite by username, accept pending invites, list members, remove members as creator, rename). For file uploads, it allows explicit selection between CSE and SSE; for downloads, it displays a confirmation message specifying the encryption mode used. Pending invites appear in a dedicated sidebar section until the user accepts; only the creator sees the Remove button for members.
 
 ## 4. CSE vs SSE (encryption modes)
 
@@ -153,12 +161,72 @@ In both cases the **same key type** is used in this version (MK, or FK for share
 
 ## 5. Shared folders and Folder Key (FK)
 
-- Each shared folder has a **Folder Key (FK)**. All files in that folder are encrypted with the FK (not with each user’s MK).  
-- The FK is stored in the KMS **encrypted with the MK of each member**. So each member can recover the FK using their own MK.  
-- **Create:** Creator gets a new FK; it is encrypted with the creator’s MK and stored in `shared_folders.json`.  
-- **Invite:** Creator calls `invite_member(creator_token, folder_id, invitee_token)`. The KMS decrypts the FK with the creator’s MK and re-encrypts it with the invitee’s MK (so the invitee must be logged in and provide their token).  
-- **List/upload/download** in a shared folder: Storage uses `get_folder_key(token, folder_id)` to get the FK and encrypt/decrypt.  
-- Encryption on disk is preserved: only FK-encrypted blobs and FK encrypted per member are stored; no plaintext keys.
+### 5.1 Key model and security
+
+- Each shared folder has a **Folder Key (FK)**. All files in that folder are encrypted with the FK (not with each user's MK).
+- The FK is **never stored in plain form**. It is stored in the KMS in two ways:
+  - **Per member:** `fk_encrypted[user_id]` = FK encrypted with that member's MK. Only users who have accepted the invite have a slot; they recover the FK at runtime via `get_folder_key(token, folder_id)`.
+  - **Application-level:** `fk_app_enc` = FK encrypted with the **APP_KEY** (from env `SECURE_STORAGE_APP_KEY`, 64 hex chars). This allows an invitee to obtain the FK and create their own slot **without the creator being online**.
+- **APP_KEY** is a single 32-byte key loaded from `.env` at runtime. It is used only to encrypt/decrypt the FK when (1) creating a shared folder and (2) when an invitee accepts. It is not stored in code or in shared_folders.json in plain form; only `fk_app_enc` (ciphertext) is stored.
+- **Visibility:** A folder appears in the user's "shared folders" list only **after** they have accepted (i.e. they have a slot in `fk_encrypted`). Until then, it appears only in **Pending invites** (invited but not yet accepted).
+- **Roles:** Only the **creator** can invite and remove members. The creator does not appear in the members list; only other members are listed. Non-creators cannot remove anyone.
+
+### 5.2 Activity flow (shared folder)
+
+The following diagram describes the flow using text (markdown). Swimmer lanes: **Creator**, **Invitee**, **KMS**.
+
+```text
+
+[Creator]                    [KMS]                         [Invitee]
+    |                           |                                |
+    | create_shared_folder      |                                |
+    |-------------------------->|                                |
+    |                           | new FK; store fk_enc[creator], |
+    |                           | fk_app_enc (FK enc with        |
+    |                           | APP_KEY); creator_id, members  |
+    |<--------------------------|                                |
+    | folder_id                 |                                |
+    |                           |                                |
+    | invite_member(folder_id, username)                         |
+    |-------------------------->|                                |
+    |                           | resolve username -> user_id;   |
+    |                           | add to members (no FK slot)    |
+    |<--------------------------|                                |
+    |                           |                                |
+    |                           |     list_pending_invites()     |
+    |                           |<-------------------------------|
+    |                           | folder appears in pending      |
+    |                           |------------------------------->|
+    |                           |                                |
+    |                           |     accept_invite(folder_id)   |
+    |                           |<-------------------------------|
+    |                           | decrypt fk_app_enc with        |
+    |                           | APP_KEY -> FK; enc FK with     |
+    |                           | invitee MK -> store            |
+    |                           | fk_enc[invitee_id]             |
+    |                           |------------------------------->|
+    |                           |                                |
+    |                           |     list_shared_folders()      |
+    |                           |<-------------------------------|
+    |                           | folder now in list (has slot)  |
+    |                           |------------------------------->|
+    |                           |                                |
+    | list_members(folder_id)   |     list_members(folder_id)    |
+    |-------------------------->|<-------------------------------|
+    |                           | members (no creator),          |
+    |                           | you_are_creator                |
+    |<--------------------------|------------------------------->|
+    |                           |                                |
+    | remove_member(...)        |  (only creator; removes from   |
+    |-------------------------->|   members + fk_encrypted)      |
+    |                           |                                |
+```
+
+- **Create:** Creator gets folder_id; FK is stored encrypted under creator's MK and under APP_KEY.
+- **Invite:** Creator invites by username; invitee is added to `members` only.
+- **Accept:** Invitee calls accept; KMS uses APP_KEY to recover FK and creates invitee's FK slot. No creator involvement.
+- **List shared / List pending:** Shared list = folders with FK slot; Pending = in members but no FK slot.
+- **List members / Remove:** Only creator sees Remove; creator is excluded from the members list.
 
 ## 6. Secure deletion of keys
 
