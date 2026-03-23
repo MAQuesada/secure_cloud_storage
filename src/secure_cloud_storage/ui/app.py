@@ -80,7 +80,10 @@ def _render_main(app: ClientService) -> None:
         "Encryption mode", ["cse", "sse"], key="mode", format_func=lambda x: x.upper()
     )
     st.sidebar.radio(
-        "Encryption algorithm", ["aesgcm", "chacha20", "fernet"], key="alg", format_func=lambda x: x.upper()
+        "Encryption algorithm",
+        ["aesgcm", "chacha20", "fernet"],
+        key="alg",
+        format_func=lambda x: x.upper(),
     )
     if st.sidebar.button("Log out"):
         st.session_state.token = None
@@ -116,6 +119,10 @@ def _render_main(app: ClientService) -> None:
         return
 
     st.subheader("Files")
+    if "error_msg" in st.session_state:
+        st.error(st.session_state["error_msg"])
+        del st.session_state["error_msg"]
+
     if not files:
         st.info("No files. Upload one below.")
     else:
@@ -128,19 +135,25 @@ def _render_main(app: ClientService) -> None:
             with col1:
                 st.text(f"{f['filename']} ({f['file_id']}) [{file_mode.upper()}]")
             with col2:
-                try:
-                    data, used_mode = app.get_file_bytes(
-                        token, f["file_id"], folder_id=folder_id
-                    )
-                    st.download_button(
-                        "Download",
-                        data=data,
-                        file_name=f["filename"],
-                        key=f"dl_{f['file_id']}",
-                    )
-                    st.caption(f"File downloaded correctly using {used_mode.upper()}")
-                except Exception as e:
-                    st.error(str(e))
+                if st.button("Prepare download", key=f"predl_{f['file_id']}"):
+                    # It is created the button after touch it, because you can download fine a file although is has been changed
+                    try:
+                        data, used_mode = app.get_file_bytes(
+                            token, f["file_id"], folder_id=folder_id
+                        )
+                        st.download_button(
+                            "Download",
+                            data=data,
+                            file_name=f["filename"],
+                            key=f"dl_{f['file_id']}",
+                        )
+                        st.caption(
+                            f"File downloaded correctly using {used_mode.upper()}"
+                        )
+                    except Exception as e:
+                        st.session_state["error_msg"] = str(e)
+                        st.error(str(e))
+                        st.rerun()
             with col3:
                 if st.button("Delete", key=f"del_{f['file_id']}"):
                     try:
@@ -167,7 +180,7 @@ def _render_main(app: ClientService) -> None:
                     filename=uploaded.name,
                     folder_id=folder_id,
                     encryption_mode=mode,
-                    algorithm=alg
+                    algorithm=alg,
                 )
                 st.success(f"Uploaded: {file_id}")
                 st.rerun()
@@ -195,7 +208,9 @@ def _render_main(app: ClientService) -> None:
     for f in shared_folders:
         st.sidebar.text(f"{f['name']} ({f['folder_id'][:8]}…)")
     with st.sidebar.expander("Invite to folder"):
-        st.caption("Select the folder and enter the username to invite. They must accept to get access.")
+        st.caption(
+            "Select the folder and enter the username to invite. They must accept to get access."
+        )
         inv_folder_options = [f["name"] for f in shared_folders]
         inv_folder_ids = [f["folder_id"] for f in shared_folders]
         if not inv_folder_options:
@@ -213,7 +228,9 @@ def _render_main(app: ClientService) -> None:
             if st.button("Invite", key="inv_btn"):
                 if inv_folder and inv_username:
                     try:
-                        app.invite_to_shared_folder(token, inv_folder, inv_username.strip())
+                        app.invite_to_shared_folder(
+                            token, inv_folder, inv_username.strip()
+                        )
                         st.success(f"Invite sent to {inv_username}. They must accept.")
                         st.rerun()
                     except KMSError as e:
@@ -264,7 +281,9 @@ def _render_main(app: ClientService) -> None:
                 with col1:
                     st.caption(f"{m['username']} ({m['user_id'][:8]}…)")
                 with col2:
-                    if you_are_creator and st.button("Remove", key=f"remove_{mem_fid}_{m['user_id']}"):
+                    if you_are_creator and st.button(
+                        "Remove", key=f"remove_{mem_fid}_{m['user_id']}"
+                    ):
                         try:
                             app.remove_member(token, mem_fid, m["username"])
                             st.success("Removed.")

@@ -21,7 +21,7 @@ This document describes the **encryption algorithm implementation** of the Secur
 | `aesgcm` | AES-GCM | 32 bytes | 12 bytes | Yes | `aesgcm\|aad\|<nonce>ciphertext` |
 | `chacha20` | ChaCha20-poly1305 | 32 bytes | 12 bytes | Yes | `chacha20\|aad\|<nonce>ciphertext` |
 
-The metadata employed for the AAD consists of two fields: `algorithm`, `encryption_mode` and `filename`.
+The metadata employed for the AAD consists of two fields: `filename`, `encryption_mode` and `algorithm_mode`. Those are the same fields employed in .meta file. 
 
 ## 3. Implementation
 
@@ -34,7 +34,7 @@ The metadata employed for the AAD consists of two fields: `algorithm`, `encrypti
     - `secure_overwrite_file(path)`: Overwrite file contents with random data before deletion (secure delete).
     - `encrypt_bytes(key, plaintext, algorithm, metadata)`: Encrypt plaintext using the specified algorithm. For AESGCM it will used the metadata to encrypt too. The rest of the algorithm, metadata is used only for blob file. 
     - `decrypt_bytes(key, blob)`: Decrypt a blob produced by encrypt_bytes using the algorithm specified on it.
-- **Implemented Changes respect the 01 version:**
+- **Implemented Changes with respect to Version 01:**
     - `algorithm` and `metadata` inputs has been added in `encrypt_bytes`. Depending on the chosen algorithm among the three available types, the corresponding encryption algorithm will be executed. In the case of Fernet, the key will first be converted to the correct format. 
     - The structure of the returned blob varies according to the algorithm, as indicated in the previous section.
     - When the `decrypt_bytes` function is executed, it uses the algorithm stored at the start of the binary file to determine the decryption method. Likewise, if Fernet is used, the key is first converted to the correct type.
@@ -43,19 +43,21 @@ The metadata employed for the AAD consists of two fields: `algorithm`, `encrypti
 ### 3.2 Client (application layer)
 
 - **Location**: `src/secure_cloud_storage/client/`
-- **Implemented Changes respect the 01 version:**
-    - Use of `aesgcm` as the default algorithm for uploading files. This algorithm is sent to the storage to encrypt its files using the same method.
+- **Implemented Changes with respect to Version 01:**
+    - Use of `aesgcm` as the default algorithm for uploading files. This algorithm is sent to the storage service so that files are encrypted using the same method.
+    - When **CSE mode** is active, the system checks whether the encrypted blob file (in `aesgcm` or `chacha20` mode) or the `.meta` file has been modified before downloading. If any modification is detected, the storage service is instructed to delete the file. 
 
 ### 3.3 Storage (storage backend)
 
 - **Location**: `src/secure_cloud_storage/storage/`
-- **Implemented Changes respect the 01 version:**
+- **Implemented Changes with respect to Version 01:**
     - Use of `aesgcm` as the default algorithm for uploading files.
+    - When **SSE mode** is active, the system checks whether the encrypted blob file (in `aesgcm` or `chacha20` mode) or the `.meta` file has been modified before downloading. If any modification is detected, the file is deleted. 
 
 ### 3.4 KMS (Key Management Service)
 
 - **Location**: `src/secure_cloud_storage/kms/`
-- **Implemented Changes respect the 01 version:**
+- **Implemented Changes with respect to Version 01:**
     - Use of `fernet` as the default algorithm to encrypt master keys and folder keys.
 
 ### 3.5 CLI (Click)
@@ -66,5 +68,5 @@ The metadata employed for the AAD consists of two fields: `algorithm`, `encrypti
 ### 3.6 UI (Streamlit)
 
 - **Entry:** `uv run python -m secure_cloud_storage --ui`.  
-- **New behaviour:** The encryption algorithm used for file uploads can be selected in the same manner as the SSE and CSE modes. By default, it is selected `aesgcm`.
+- **New behaviour:** The encryption algorithm used for file uploads can be selected in the same manner as the **SSE** and **CSE** modes. By default, `aesgcm` is selected. In addition, when you want to download an specific file, you must click the `"Prepare Download"` button before downloading, as decryption occurs after this button is pressed. If a file is corrupted and has been deleted, an error message is displayed on the screen.
 
