@@ -1,10 +1,10 @@
-"""Client service: orchestrates KMS + Storage; handles CSE (encrypt/decrypt) and SSE (plain)."""
+"""Client service: orchestrates KMS + Storage; handles CSE (encrypt/decrypt) and SSE (plain) using DEKs."""
 
 import uuid
 from pathlib import Path
 from typing import Literal
 
-from secure_cloud_storage.crypto import encrypt_bytes, decrypt_bytes
+from secure_cloud_storage.crypto import encrypt_bytes, decrypt_bytes, secure_zero
 from secure_cloud_storage.kms import KMS
 from secure_cloud_storage.kms.store import KMSError
 from secure_cloud_storage.storage import StorageBackend
@@ -55,19 +55,35 @@ class ClientService:
         file_id = uuid.uuid4().hex
         display_name = filename or path.name
         data = path.read_bytes()
+        
         if encryption_mode == "cse":
-            key = (
-                self._kms.get_key_for_token(token)
-                if not folder_id
-                else self._kms.get_folder_key(token, folder_id)
-            )
+            wrapped_dek_hex = None
+            key_version = None
+            
+            if folder_id:
+                # Carpetas compartidas mantienen su lógica por ahora
+                key = self._kms.get_folder_key(token, folder_id)
+            else:
+                # === NEW: Envelope Encryption (CSE Personal) ===
+                user_id = self._kms.get_user_id_for_token(token)
+                raw_dek, wrapped_dek = self._kms.generate_dek(user_id)
+                key_version = self._kms.get_key_version(user_id)
+                key = raw_dek
+                wrapped_dek_hex = wrapped_dek.hex()
+
             metadata = {
                 "filename": filename or file_id,
                 "encryption_mode": encryption_mode,
                 "algorithm_mode": algorithm,
-                # OJOOOOO -> MAYBE IT IS NECESSARY TO PUT KEY_ID HERE OR SOMETHING LIKE THAT IN THE FUTURE
             }
-            data = encrypt_bytes(key, data, algorithm, metadata)
+            
+            try:
+                data = encrypt_bytes(key, data, algorithm, metadata)
+            finally:
+                if not folder_id:
+                    # Borrado seguro de la DEK de la memoria
+                    secure_zero(bytearray(key))
+                    
             self._storage.upload(
                 token,
                 file_id,
@@ -76,6 +92,8 @@ class ClientService:
                 filename=display_name,
                 encryption_mode="cse",
                 algorithm=algorithm,
+                client_wrapped_dek_hex=wrapped_dek_hex,
+                client_key_version=key_version,
             )
         else:
             self._storage.upload(
@@ -108,15 +126,30 @@ class ClientService:
         folder_id: str | None = None,
     ) -> tuple[bytes, str]:
         """Return (file contents, encryption_mode). Mode is read from file metadata for correct key."""
-        data, mode, alg, file = self._storage.download(
+        
+        # Ahora el backend devuelve 5 parámetros, incluyendo meta_raw
+        data, mode, alg, file, meta_raw = self._storage.download(
             token, file_id, folder_id=folder_id
         )
+        
         if mode == "cse":
-            key = (
-                self._kms.get_key_for_token(token)
-                if not folder_id
-                else self._kms.get_folder_key(token, folder_id)
-            )
+            if folder_id:
+                key = self._kms.get_folder_key(token, folder_id)
+            else:
+                # === NEW: Envelope Encryption (CSE Personal) ===
+                user_id = self._kms.get_user_id_for_token(token)
+                wrapped_dek_hex = meta_raw.get("wrapped_dek_hex")
+                key_version = meta_raw.get("key_version")
+                
+                if not wrapped_dek_hex or not key_version:
+                    raise StorageError("Missing DEK metadata in CSE file. Cannot decrypt.")
+                    
+                wrapped_dek = bytes.fromhex(wrapped_dek_hex)
+                try:
+                    key = self._kms.unwrap_dek(user_id, wrapped_dek, key_version)
+                except KMSError as e:
+                    raise StorageError(f"Failed to unwrap DEK: {e}")
+
             try:
                 data, metadata = decrypt_bytes(key, data)
             except InvalidTag:
@@ -124,6 +157,9 @@ class ClientService:
                 raise StorageError(
                     "File integrity verification failed (AAD/authentication tag mismatch)"
                 )
+            finally:
+                if not folder_id:
+                     secure_zero(bytearray(key))
 
             # If it doesnt raise the exception, the file metadata is correct
             file_aad = metadata.get("filename")

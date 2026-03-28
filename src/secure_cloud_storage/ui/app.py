@@ -1,5 +1,6 @@
 """Streamlit app: login, list, upload, download, delete, CSE/SSE mode, shared folders."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -13,9 +14,14 @@ from secure_cloud_storage.storage import StorageBackend
 from secure_cloud_storage.storage.backend import StorageError
 
 
-def _get_app() -> ClientService:
-    """Build KMS + Storage + ClientService (same process)."""
+def _get_app(admin_password: str | None = None) -> ClientService:
+    """Build KMS + Storage + ClientService and unlock KEK."""
     kms = KMS(store_dir=KMS_STORE_DIR)
+    
+    # Desbloqueamos el KMS con la contraseña proporcionada
+    if admin_password:
+        kms.unlock_kek(admin_password)
+        
     storage = StorageBackend(file_bin_dir=FILE_BIN_DIR, kms=kms)
     return ClientService(kms=kms, storage=storage)
 
@@ -313,8 +319,33 @@ def _render_main(app: ClientService) -> None:
 def main() -> None:
     """Entry point for Streamlit app."""
     _init_session()
-    app = _get_app()
+    
+    # 1. Buscar contraseña de admin en variables de entorno
+    admin_password = os.environ.get("KMS_ADMIN_PASSWORD")
+    
+    # 2. Si no está en el entorno, buscar en session_state
+    if not admin_password and "admin_pwd" in st.session_state:
+        admin_password = st.session_state.admin_pwd
 
+    # 3. Pantalla de bloqueo si no hay contraseña
+    if not admin_password:
+        st.title("🔒 KMS Locked")
+        st.warning("The system is locked. Only the administrator can initialize the KMS.")
+        pwd = st.text_input("Admin Password (KEK Unlock)", type="password")
+        if st.button("Unlock System"):
+            st.session_state.admin_pwd = pwd
+            st.rerun()
+        return
+
+    # 4. Intentar arrancar la aplicación
+    try:
+        app = _get_app(admin_password)
+    except KMSError as e:
+        st.error(f"Critical failure unlocking KMS: {e}")
+        st.session_state.pop("admin_pwd", None)
+        return
+
+    # 5. Flujo normal si está desbloqueado
     if not st.session_state.token:
         _render_login(app)
         return
