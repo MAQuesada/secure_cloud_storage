@@ -16,6 +16,7 @@ EncryptionMode = Literal["cse", "sse"]
 EncAlgMode = Literal["aesgcm", "chacha20", "fernet"]
 BLOB_SUFFIX = ".blob"
 META_SUFFIX = ".meta"
+CHUNK_SIZE = 1024 * 1024  # 1MB per chunk
 
 
 class StorageError(Exception):
@@ -24,7 +25,9 @@ class StorageError(Exception):
 
 
 class StorageBackend:
-    """Storage layer over file_bin; uses token for identity and calls KMS for keys in SSE mode."""
+    """Storage layer over file_bin; uses token for identity and calls KMS for keys in SSE mode.
+    In SSE mode, files are split into chunks, each encrypted with a different DEK.
+    """
 
     def __init__(
         self, file_bin_dir: Path | None = None, kms: KMS | None = None
@@ -51,6 +54,10 @@ class StorageBackend:
             return self._user_dir(user_id)
         return self._shared_dir(folder_id)
 
+    def _split_chunks(self, data: bytes) -> list[bytes]:
+        """Split data into chunks of CHUNK_SIZE bytes."""
+        return [data[i:i + CHUNK_SIZE] for i in range(0, len(data), CHUNK_SIZE)] or [b""]
+
     def list_files(self, token: str, folder_id: str | None = None) -> list[dict]:
         """List files for the user (or in the shared folder). Returns list of {file_id, filename}."""
         base = self._base_dir(token, folder_id)
@@ -60,8 +67,9 @@ class StorageBackend:
         for p in base.iterdir():
             if p.suffix == META_SUFFIX:
                 file_id = p.stem
+                chunk_path = base / f"{file_id}_chunk_0{BLOB_SUFFIX}"
                 blob_path = base / f"{file_id}{BLOB_SUFFIX}"
-                if not blob_path.is_file():
+                if not chunk_path.is_file() and not blob_path.is_file():
                     continue
                 try:
                     with open(p, encoding="utf-8") as f:
@@ -97,10 +105,12 @@ class StorageBackend:
         client_wrapped_dek_hex: str | None = None,
         client_key_version: int | None = None,
     ) -> None:
-        """Store data. In CSE mode data is already encrypted (and may provide DEK meta); in SSE mode we encrypt here using KMS DEK."""
+        """Store data. In SSE mode: split into chunks, each encrypted with its own DEK.
+        In CSE mode: data is already encrypted, stored as a single chunk.
+        """
         base = self._base_dir(token, folder_id)
         base.mkdir(parents=True, exist_ok=True)
-        
+
         meta_dict = {
             "filename": filename or file_id,
             "encryption_mode": encryption_mode,
@@ -110,42 +120,53 @@ class StorageBackend:
         if encryption_mode == "sse":
             if not self._kms:
                 raise StorageError("KMS required for SSE")
-            
+
             user_id = self._resolve_user_id(token)
-            
-            if folder_id:
-                # OJO: Para shared folders por simplicidad actual mantenemos el viejo método adaptado
-                # En un rediseño completo de shared folders, habría una folder_dek
-                key = self._kms.get_folder_key(token, folder_id)
-                data = encrypt_bytes(key, data, algorithm, meta_dict)
-            else:
-                # === NEW: Envelope Encryption con DEK (SSE Personal) ===
-                raw_dek, wrapped_dek = self._kms.generate_dek(user_id)
-                key_version = self._kms.get_key_version(user_id)
-                
-                # Ciframos usando la DEK plana
-                data = encrypt_bytes(raw_dek, data, algorithm, meta_dict)
-                
-                # Guardamos la DEK envuelta en los metadatos del archivo
-                meta_dict["wrapped_dek_hex"] = wrapped_dek.hex()
-                meta_dict["key_version"] = key_version
-                
-                # Borramos la DEK plana por seguridad (aunque al acabar la función se elimina, es buena práctica)
-                import secure_cloud_storage.crypto as crypto
-                crypto.secure_zero(bytearray(raw_dek))
+            chunks = self._split_chunks(data)
+            chunk_metas = []
+
+            for i, chunk in enumerate(chunks):
+                chunk_meta_aad = {
+                    "filename": filename or file_id,
+                    "encryption_mode": encryption_mode,
+                    "algorithm_mode": algorithm,
+                    "chunk_index": i,
+                }
+
+                if folder_id:
+                    key = self._kms.get_folder_key(token, folder_id)
+                    encrypted_chunk = encrypt_bytes(key, chunk, algorithm, chunk_meta_aad)
+                    chunk_metas.append({"wrapped_dek_hex": None, "key_version": None})
+                else:
+                    raw_dek, wrapped_dek = self._kms.generate_dek(user_id)
+                    key_version = self._kms.get_key_version(user_id)
+                    encrypted_chunk = encrypt_bytes(raw_dek, chunk, algorithm, chunk_meta_aad)
+                    chunk_metas.append({
+                        "wrapped_dek_hex": wrapped_dek.hex(),
+                        "key_version": key_version,
+                    })
+                    import secure_cloud_storage.crypto as crypto
+                    crypto.secure_zero(bytearray(raw_dek))
+
+                chunk_path = base / f"{file_id}_chunk_{i}{BLOB_SUFFIX}"
+                with open(chunk_path, "wb") as f:
+                    f.write(encrypted_chunk)
+
+            meta_dict["num_chunks"] = len(chunks)
+            meta_dict["chunk_metas"] = chunk_metas
+
         else:
-            # === CSE Mode ===
-            # The data is already encrypted. If the client passed DEK info, we save it.
+            # CSE: data already encrypted, store as single chunk
+            chunk_path = base / f"{file_id}_chunk_0{BLOB_SUFFIX}"
+            with open(chunk_path, "wb") as f:
+                f.write(data)
+            meta_dict["num_chunks"] = 1
+            meta_dict["chunk_metas"] = [{"wrapped_dek_hex": None, "key_version": None}]
             if client_wrapped_dek_hex and client_key_version:
                 meta_dict["wrapped_dek_hex"] = client_wrapped_dek_hex
                 meta_dict["key_version"] = client_key_version
 
-        blob_path = base / f"{file_id}{BLOB_SUFFIX}"
         meta_path = base / f"{file_id}{META_SUFFIX}"
-        
-        with open(blob_path, "wb") as f:
-            f.write(data)
-            
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_dict, f)
 
@@ -155,91 +176,202 @@ class StorageBackend:
         file_id: str,
         folder_id: str | None = None,
     ) -> tuple[bytes, str, str, str, dict]:
-        """Return (file_contents, encryption_mode, algorithm, filename, raw_meta). Mode is read from metadata."""
+        """Return (file_contents, encryption_mode, algorithm, filename, raw_meta).
+        Reads all chunks, decrypts each with its DEK, and reassembles.
+        """
         base = self._base_dir(token, folder_id)
-        blob_path = base / f"{file_id}{BLOB_SUFFIX}"
         meta_path = base / f"{file_id}{META_SUFFIX}"
-        
-        if not blob_path.is_file():
+
+        if not meta_path.is_file():
             raise StorageError(f"File not found: {file_id}")
-            
-        mode: EncryptionMode = "cse"
-        alg: EncAlgMode = "aesgcm"
-        file = ""
-        meta_raw = {}
-        
+
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta_raw = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            raise StorageError(f"Corrupted metadata for file: {file_id}")
+
+        mode: EncryptionMode = meta_raw.get("encryption_mode", "cse")
+        alg: EncAlgMode = meta_raw.get("algorithm_mode", "aesgcm")
+        filename = meta_raw.get("filename", file_id)
+        num_chunks = meta_raw.get("num_chunks", 1)
+        chunk_metas = meta_raw.get("chunk_metas", [])
+
+        reassembled = b""
+
+        for i in range(num_chunks):
+            chunk_path = base / f"{file_id}_chunk_{i}{BLOB_SUFFIX}"
+
+            if not chunk_path.is_file():
+                old_blob = base / f"{file_id}{BLOB_SUFFIX}"
+                if old_blob.is_file():
+                    chunk_path = old_blob
+                else:
+                    raise StorageError(f"Missing chunk {i} for file: {file_id}")
+
+            with open(chunk_path, "rb") as f:
+                chunk_data = f.read()
+
+            if mode == "sse":
+                if not self._kms:
+                    raise StorageError("KMS required for SSE")
+
+                user_id = self._resolve_user_id(token)
+
+                if folder_id:
+                    key = self._kms.get_folder_key(token, folder_id)
+                else:
+                    chunk_meta_info = chunk_metas[i] if i < len(chunk_metas) else {}
+                    wrapped_dek_hex = chunk_meta_info.get("wrapped_dek_hex")
+                    key_version = chunk_meta_info.get("key_version")
+
+                    if not wrapped_dek_hex or not key_version:
+                        raise StorageError(f"Missing DEK metadata for chunk {i}")
+
+                    wrapped_dek = bytes.fromhex(wrapped_dek_hex)
+                    try:
+                        key = self._kms.unwrap_dek(user_id, wrapped_dek, key_version)
+                    except KMSError as e:
+                        raise StorageError(f"Failed to unwrap DEK for chunk {i}: {e}")
+
+                try:
+                    chunk_plain, chunk_meta_aad = decrypt_bytes(key, chunk_data)
+                except InvalidTag:
+                    self.delete(token, file_id, folder_id)
+                    raise StorageError(f"Integrity check failed on chunk {i} (AAD mismatch)")
+                finally:
+                    if not folder_id:
+                        import secure_cloud_storage.crypto as crypto
+                        crypto.secure_zero(bytearray(key))
+
+                if chunk_meta_aad.get("filename") != filename:
+                    self.delete(token, file_id, folder_id)
+                    raise StorageError(f"Chunk {i} filename AAD mismatch")
+                if chunk_meta_aad.get("encryption_mode") != mode:
+                    self.delete(token, file_id, folder_id)
+                    raise StorageError(f"Chunk {i} encryption mode AAD mismatch")
+                if chunk_meta_aad.get("chunk_index") != i:
+                    self.delete(token, file_id, folder_id)
+                    raise StorageError(f"Chunk {i} index AAD mismatch")
+
+                reassembled += chunk_plain
+            else:
+                reassembled += chunk_data
+
+        return (reassembled, mode, alg, filename, meta_raw)
+
+    def delete(self, token: str, file_id: str, folder_id: str | None = None) -> None:
+        """Remove all chunks and metadata for a file."""
+        base = self._base_dir(token, folder_id)
+        meta_path = base / f"{file_id}{META_SUFFIX}"
+
+        num_chunks = 1
         if meta_path.is_file():
             try:
                 with open(meta_path, encoding="utf-8") as f:
-                    meta_raw = json.load(f)
-                mode = meta_raw.get("encryption_mode", "cse")
-                file = meta_raw.get("filename", "")
-                alg = meta_raw.get("algorithm_mode", "aesgcm")
+                    meta = json.load(f)
+                num_chunks = meta.get("num_chunks", 1)
             except (json.JSONDecodeError, OSError):
                 pass
-                
-        with open(blob_path, "rb") as f:
-            data = f.read()
-            
-        if mode == "sse":
-            if not self._kms:
-                raise StorageError("KMS required for SSE")
-                
-            user_id = self._resolve_user_id(token)
-            
-            if folder_id:
-                # Shared folders viejo
-                key = self._kms.get_folder_key(token, folder_id)
-            else:
-                # === NEW: Envelope Encryption (SSE Personal) ===
-                wrapped_dek_hex = meta_raw.get("wrapped_dek_hex")
-                key_version = meta_raw.get("key_version")
-                
-                if not wrapped_dek_hex or not key_version:
-                    raise StorageError("Missing DEK metadata in SSE file. File cannot be decrypted.")
-                    
-                wrapped_dek = bytes.fromhex(wrapped_dek_hex)
-                try:
-                    key = self._kms.unwrap_dek(user_id, wrapped_dek, key_version)
-                except KMSError as e:
-                    raise StorageError(f"Failed to unwrap DEK: {e}")
 
-            try:
-                # Desciframos usando la DEK
-                data, metadata = decrypt_bytes(key, data)
-            except InvalidTag:
-                self.delete(token, file_id, folder_id)
-                raise StorageError("File integrity verification failed (AAD/authentication tag mismatch)")
-            finally:
-                if not folder_id:
-                     import secure_cloud_storage.crypto as crypto
-                     crypto.secure_zero(bytearray(key))
+        deleted_any = False
+        for i in range(num_chunks):
+            chunk_path = base / f"{file_id}_chunk_{i}{BLOB_SUFFIX}"
+            if chunk_path.is_file():
+                chunk_path.unlink()
+                deleted_any = True
 
-            # Verificación de integridad AAD
-            file_aad = metadata.get("filename")
-            encryp_aad = metadata.get("encryption_mode")
-            alg_aad = metadata.get("algorithm_mode")
-            
-            if file is None or file != file_aad:
-                self.delete(token, file_id, folder_id)
-                raise StorageError(f"File .meta was modified in name -> .meta: {file}; Verified: {file_aad}")
-            if mode is None or mode != encryp_aad:
-                self.delete(token, file_id, folder_id)
-                raise StorageError(f"File .meta was modified in mode -> .meta: {mode}; Verified: {encryp_aad}")
-            if alg is None or alg != alg_aad:
-                self.delete(token, file_id, folder_id)
-                raise StorageError(f"File .meta was modified in encryption algorithm-> .meta: {alg}; Verified: {alg_aad}")
-                
-        # We return meta_raw as well so the client can extract DEK info for CSE decryption
-        return (data, mode, alg, file, meta_raw)
+        old_blob = base / f"{file_id}{BLOB_SUFFIX}"
+        if old_blob.is_file():
+            old_blob.unlink()
+            deleted_any = True
 
-    def delete(self, token: str, file_id: str, folder_id: str | None = None) -> None:
-        """Remove file blob and metadata. No key material involved."""
-        base = self._base_dir(token, folder_id)
-        blob_path = base / f"{file_id}{BLOB_SUFFIX}"
-        meta_path = base / f"{file_id}{META_SUFFIX}"
-        if not blob_path.is_file():
+        if not deleted_any and not meta_path.is_file():
             raise StorageError(f"File not found: {file_id}")
-        blob_path.unlink()
+
         if meta_path.is_file():
             meta_path.unlink()
+
+    def reencrypt_file(self, token: str, file_id: str, folder_id: str | None = None) -> None:
+        """Re-encrypt all chunks of a file with new DEKs (called after key rotation)."""
+        base = self._base_dir(token, folder_id)
+        meta_path = base / f"{file_id}{META_SUFFIX}"
+
+        if not meta_path.is_file():
+            raise StorageError(f"File not found: {file_id}")
+
+        with open(meta_path, encoding="utf-8") as f:
+            meta_raw = json.load(f)
+
+        mode: EncryptionMode = meta_raw.get("encryption_mode", "cse")
+        alg: EncAlgMode = meta_raw.get("algorithm_mode", "aesgcm")
+        filename = meta_raw.get("filename", file_id)
+        num_chunks = meta_raw.get("num_chunks", 1)
+        chunk_metas = meta_raw.get("chunk_metas", [])
+
+        # Only SSE personal files need re-encryption
+        if mode != "sse" or folder_id:
+            return
+
+        if not self._kms:
+            raise StorageError("KMS required for re-encryption")
+
+        user_id = self._resolve_user_id(token)
+        new_chunk_metas = []
+
+        for i in range(num_chunks):
+            chunk_path = base / f"{file_id}_chunk_{i}{BLOB_SUFFIX}"
+            if not chunk_path.is_file():
+                raise StorageError(f"Missing chunk {i} for file: {file_id}")
+
+            with open(chunk_path, "rb") as f:
+                chunk_data = f.read()
+
+            # 1. Decrypt with OLD DEK
+            chunk_meta_info = chunk_metas[i] if i < len(chunk_metas) else {}
+            wrapped_dek_hex = chunk_meta_info.get("wrapped_dek_hex")
+            key_version = chunk_meta_info.get("key_version")
+
+            if not wrapped_dek_hex or not key_version:
+                raise StorageError(f"Missing DEK metadata for chunk {i}")
+
+            old_wrapped_dek = bytes.fromhex(wrapped_dek_hex)
+            old_key = self._kms.unwrap_dek(user_id, old_wrapped_dek, key_version)
+
+            try:
+                chunk_plain, _ = decrypt_bytes(old_key, chunk_data)
+            except InvalidTag:
+                raise StorageError(f"Integrity check failed on chunk {i} during re-encryption")
+            finally:
+                import secure_cloud_storage.crypto as crypto
+                crypto.secure_zero(bytearray(old_key))
+
+            # 2. Re-encrypt with NEW DEK
+            new_raw_dek, new_wrapped_dek = self._kms.generate_dek(user_id)
+            new_key_version = self._kms.get_key_version(user_id)
+
+            chunk_meta_aad = {
+                "filename": filename,
+                "encryption_mode": mode,
+                "algorithm_mode": alg,
+                "chunk_index": i,
+            }
+
+            new_encrypted_chunk = encrypt_bytes(new_raw_dek, chunk_plain, alg, chunk_meta_aad)
+
+            import secure_cloud_storage.crypto as crypto
+            crypto.secure_zero(bytearray(new_raw_dek))
+
+            # 3. Overwrite chunk on disk
+            with open(chunk_path, "wb") as f:
+                f.write(new_encrypted_chunk)
+
+            new_chunk_metas.append({
+                "wrapped_dek_hex": new_wrapped_dek.hex(),
+                "key_version": new_key_version,
+            })
+
+        # 4. Update metadata
+        meta_raw["chunk_metas"] = new_chunk_metas
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_raw, f)
