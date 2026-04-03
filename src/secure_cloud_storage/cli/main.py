@@ -1,5 +1,6 @@
 """Click CLI: login, register, list, upload, download, delete, shared, help."""
 
+import os
 from pathlib import Path
 
 import click
@@ -14,12 +15,31 @@ from secure_cloud_storage.storage.backend import StorageError
 EncryptionMode = str  # "cse" | "sse"
 EncAlgMode = str # "aesgcm" | "chacha20" | "fernet"
 
+# We use a global variable to avoid prompting for the master password 
+_app_instance = None
 
 def _get_app() -> ClientService:
-    """Build KMS + Storage + ClientService (same process, no network)."""
+    """Build KMS + Storage + ClientService and unlock KEK."""
+    global _app_instance
+    if _app_instance is not None:
+        return _app_instance
+
     kms = KMS(store_dir=KMS_STORE_DIR)
+    
+    # --- KEK UNLOCK LOGIC ---
+    admin_password = os.environ.get("KMS_ADMIN_PASSWORD")
+    if not admin_password:
+        admin_password = click.prompt("🔒 Enter KMS Admin Password to unlock KEK", hide_input=True)
+        
+    try:
+        kms.unlock_kek(admin_password)
+    except KMSError as e:
+        raise click.ClickException(f"Failed to unlock KMS: {e}")
+    # --------------------------------
+        
     storage = StorageBackend(file_bin_dir=FILE_BIN_DIR, kms=kms)
-    return ClientService(kms=kms, storage=storage)
+    _app_instance = ClientService(kms=kms, storage=storage)
+    return _app_instance
 
 
 def _read_token() -> str | None:
@@ -77,7 +97,7 @@ def cli(ctx: click.Context, mode: str, alg: str) -> None:
     ctx.ensure_object(dict)
     ctx.obj["mode"] = mode.lower()
     ctx.obj["alg"] = alg.lower()
-    ctx.obj["app"] = _get_app()
+    # We NO LONGER instantiate the app here to prevent commands like 'help' from prompting for a password
 
 
 @cli.command()
@@ -121,7 +141,7 @@ def logout() -> None:
 def list_files(ctx: click.Context, folder_id: str | None) -> None:
     """List files (personal or in a shared folder)."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         files = app.list_files(token, folder_id=folder_id)
         if not files:
@@ -141,9 +161,9 @@ def upload(ctx: click.Context, path: Path, folder_id: str | None) -> None:
     """Upload a file. Returns the assigned file_id."""
     token = _require_token(ctx)
     obj = _get_ctx_obj(ctx)
-    mode: EncryptionMode = obj["mode"]
-    alg: EncAlgMode = obj["alg"]
-    app: ClientService = obj["app"]
+    mode: EncryptionMode = obj.get("mode", "cse")
+    alg: EncAlgMode = obj.get("alg", "aesgcm")
+    app = _get_app()
     try:
         file_id = app.upload_file(token, path, folder_id=folder_id, encryption_mode=mode, algorithm=alg)
         click.echo(f"Uploaded: {file_id}")
@@ -159,7 +179,7 @@ def upload(ctx: click.Context, path: Path, folder_id: str | None) -> None:
 def download(ctx: click.Context, file_id: str, output: Path | None, folder_id: str | None) -> None:
     """Download a file by file_id. Uses the mode stored when the file was uploaded."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     out = output or Path(file_id)
     try:
         mode = app.download_file(token, file_id, out, folder_id=folder_id)
@@ -176,7 +196,7 @@ def download(ctx: click.Context, file_id: str, output: Path | None, folder_id: s
 def delete(ctx: click.Context, file_id: str, folder_id: str | None) -> None:
     """Delete a file by file_id."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         app.delete_file(token, file_id, folder_id=folder_id)
         click.echo("Deleted.")
@@ -196,7 +216,7 @@ def shared() -> None:
 def shared_create(ctx: click.Context, name: str | None) -> None:
     """Create a shared folder. Prints folder_id for sharing."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         folder_id = app.create_shared_folder(token, name=name)
         click.echo(f"Created shared folder: {folder_id}" + (f" ({name})" if name else ""))
@@ -209,7 +229,7 @@ def shared_create(ctx: click.Context, name: str | None) -> None:
 def shared_list(ctx: click.Context) -> None:
     """List shared folders you are a member of (folder_id and name)."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         folders = app.list_shared_folders(token)
         if not folders:
@@ -228,7 +248,7 @@ def shared_list(ctx: click.Context) -> None:
 def shared_set_name(ctx: click.Context, folder_id: str, name: str) -> None:
     """Set or change the display name of a shared folder."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         app.set_folder_name(token, folder_id, name)
         click.echo("Name updated.")
@@ -243,7 +263,7 @@ def shared_set_name(ctx: click.Context, folder_id: str, name: str) -> None:
 def shared_invite(ctx: click.Context, folder_id: str, username: str) -> None:
     """Invite a user to the shared folder by username. They must run 'shared accept' to get access."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         app.invite_to_shared_folder(token, folder_id, username)
         click.echo(f"Invite sent to {username}. They must accept to get access.")
@@ -257,7 +277,7 @@ def shared_invite(ctx: click.Context, folder_id: str, username: str) -> None:
 def shared_accept(ctx: click.Context, folder_id: str) -> None:
     """Accept a shared folder invite. You get access immediately."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         app.accept_invite(token, folder_id)
         click.echo("Accepted. You now have access to the folder.")
@@ -270,7 +290,7 @@ def shared_accept(ctx: click.Context, folder_id: str) -> None:
 def shared_pending(ctx: click.Context) -> None:
     """List shared folders you are invited to but have not accepted yet."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         pending = app.list_pending_invites(token)
         if not pending:
@@ -288,7 +308,7 @@ def shared_pending(ctx: click.Context) -> None:
 def shared_members(ctx: click.Context, folder_id: str) -> None:
     """List members of a shared folder."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         data = app.list_members(token, folder_id)
         for m in data["members"]:
@@ -304,7 +324,7 @@ def shared_members(ctx: click.Context, folder_id: str) -> None:
 def shared_remove_member(ctx: click.Context, folder_id: str, username: str) -> None:
     """Remove a member from the shared folder (creator only)."""
     token = _require_token(ctx)
-    app: ClientService = _get_ctx_obj(ctx)["app"]
+    app = _get_app()
     try:
         app.remove_member(token, folder_id, username)
         click.echo("Member removed.")
