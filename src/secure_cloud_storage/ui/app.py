@@ -18,7 +18,7 @@ def _get_app(admin_password: str | None = None) -> ClientService:
     """Build KMS + Storage + ClientService and unlock KEK."""
     kms = KMS(store_dir=KMS_STORE_DIR)
     
-    # Desbloqueamos el KMS con la contraseña proporcionada
+    # Unlock the KMS with the provided password.
     if admin_password:
         kms.unlock_kek(admin_password)
         
@@ -320,14 +320,14 @@ def main() -> None:
     """Entry point for Streamlit app."""
     _init_session()
     
-    # 1. Buscar contraseña de admin en variables de entorno
+   # 1. Look for admin password in environment variables
     admin_password = os.environ.get("KMS_ADMIN_PASSWORD")
     
-    # 2. Si no está en el entorno, buscar en session_state
+    # 2. If not in env, look in session_state
     if not admin_password and "admin_pwd" in st.session_state:
         admin_password = st.session_state.admin_pwd
 
-    # 3. Pantalla de bloqueo si no hay contraseña
+    # 3. Lock screen if no password is provided.
     if not admin_password:
         st.title("🔒 KMS Locked")
         st.warning("The system is locked. Only the administrator can initialize the KMS.")
@@ -337,7 +337,7 @@ def main() -> None:
             st.rerun()
         return
 
-    # 4. Intentar arrancar la aplicación
+    # 4. Attempt to start the application.
     try:
         app = _get_app(admin_password)
     except KMSError as e:
@@ -345,7 +345,7 @@ def main() -> None:
         st.session_state.pop("admin_pwd", None)
         return
 
-    # 5. Flujo normal si está desbloqueado
+    # 5. Normal flow if unlocked.
     if not st.session_state.token:
         _render_login(app)
         return

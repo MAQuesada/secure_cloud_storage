@@ -114,8 +114,7 @@ class StorageBackend:
             user_id = self._resolve_user_id(token)
             
             if folder_id:
-                # OJO: Para shared folders por simplicidad actual mantenemos el viejo método adaptado
-                # En un rediseño completo de shared folders, habría una folder_dek
+                # NOTE: For shared folders, we keep the adapted old method for simplicity. In a full redesign, there would be a specific folder_dek.k
                 key = self._kms.get_folder_key(token, folder_id)
                 data = encrypt_bytes(key, data, algorithm, meta_dict)
             else:
@@ -123,14 +122,14 @@ class StorageBackend:
                 raw_dek, wrapped_dek = self._kms.generate_dek(user_id)
                 key_version = self._kms.get_key_version(user_id)
                 
-                # Ciframos usando la DEK plana
+                # Encrypt using the raw DEK.
                 data = encrypt_bytes(raw_dek, data, algorithm, meta_dict)
                 
-                # Guardamos la DEK envuelta en los metadatos del archivo
+                # Store the wrapped DEK and key version in the file metadata.
                 meta_dict["wrapped_dek_hex"] = wrapped_dek.hex()
                 meta_dict["key_version"] = key_version
                 
-                # Borramos la DEK plana por seguridad (aunque al acabar la función se elimina, es buena práctica)
+                # Securely wipe the raw DEK from memory (best practice).
                 import secure_cloud_storage.crypto as crypto
                 crypto.secure_zero(bytearray(raw_dek))
         else:
@@ -205,7 +204,7 @@ class StorageBackend:
                     raise StorageError(f"Failed to unwrap DEK: {e}")
 
             try:
-                # Desciframos usando la DEK
+                # Decrypt using the unwrapped DEK.
                 data, metadata = decrypt_bytes(key, data)
             except InvalidTag:
                 self.delete(token, file_id, folder_id)
@@ -215,7 +214,7 @@ class StorageBackend:
                      import secure_cloud_storage.crypto as crypto
                      crypto.secure_zero(bytearray(key))
 
-            # Verificación de integridad AAD
+            # AAD Integrity Verification.
             file_aad = metadata.get("filename")
             encryp_aad = metadata.get("encryption_mode")
             alg_aad = metadata.get("algorithm_mode")
