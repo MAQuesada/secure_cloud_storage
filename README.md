@@ -141,11 +141,13 @@ Scripts load variables from a `.env` file (copy `example.env` to `.env` and adju
 | `SECURE_STORAGE_SESSION_FILE` | Session token file path (CLI only; UI uses per-tab session) |
 | `SECURE_STORAGE_APP_KEY` | **Required for shared folders.** 64 hex chars (32 bytes). Used so invitees can accept without the creator online. Generate: `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `SECURE_STORAGE_KDF_ITERATIONS` | PBKDF2 iterations for key derivation (default: 600000) |
-
+| `KMS_ADMIN_PASSWORD` | Optional. Admin password to unlock the simulated hardware KEK at startup. |
 ## Documentation
 
 - [Design and basic implementation](docs/01_Design_and_basic_implementation.md) — architecture, key usage (MK, FK, APP_KEY), CSE/SSE, shared folder flow and security.
 - [Encryption algorithm](docs/02_Encryption_algorithm.md) — algorithm and metadata details.
+
+- [Key Management Service and Envelope Encryption](docs/03_KMS_Implementation.md) — KMS architecture, Hardware KEK simulation, versioned Master Keys, and DEK API.
 
 ## Python version
 

@@ -15,6 +15,7 @@ from secure_cloud_storage.storage.backend import StorageError
 EncryptionMode = str  # "cse" | "sse"
 EncAlgMode = str # "aesgcm" | "chacha20" | "fernet"
 
+# We use a global variable to avoid prompting for the master password 
 _app_instance = None
 
 def _get_app() -> ClientService:
@@ -25,6 +26,7 @@ def _get_app() -> ClientService:
 
     kms = KMS(store_dir=KMS_STORE_DIR)
     
+    # --- KEK UNLOCK LOGIC ---
     admin_password = os.environ.get("KMS_ADMIN_PASSWORD")
     if not admin_password:
         admin_password = click.prompt("🔒 Enter KMS Admin Password to unlock KEK", hide_input=True)
@@ -89,6 +91,7 @@ def cli(ctx: click.Context, mode: str, alg: str) -> None:
     ctx.ensure_object(dict)
     ctx.obj["mode"] = mode.lower()
     ctx.obj["alg"] = alg.lower()
+    # We NO LONGER instantiate the app here to prevent commands like 'help' from prompting for a password
 
 
 @cli.command()
