@@ -311,7 +311,7 @@ class StorageBackend:
 
         # Only SSE personal files need re-encryption
         if mode != "sse" or folder_id:
-            return
+            return False
 
         if not self._kms:
             raise StorageError("KMS required for re-encryption")
@@ -375,3 +375,4 @@ class StorageBackend:
         meta_raw["chunk_metas"] = new_chunk_metas
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_raw, f)
+        return True

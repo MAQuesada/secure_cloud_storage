@@ -230,8 +230,9 @@ class ClientService:
             file_id = f["file_id"]
             filename = f.get("filename", file_id)
             try:
-                self._storage.reencrypt_file(token, file_id, folder_id=None)
-                summary["reencrypted"].append(filename)
+                isSSE = self._storage.reencrypt_file(token, file_id, folder_id=None)
+                if isSSE:
+                    summary["reencrypted"].append(filename)
             except Exception as e:
                 summary["failed"].append({"file": filename, "error": str(e)})
 

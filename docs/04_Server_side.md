@@ -63,14 +63,14 @@ file_bin/
     - `upload(token, file_id, data, ...)`: In SSE mode, splits data into chunks, generates a new DEK per chunk via `KMS.generate_dek()`, encrypts each chunk, and stores `wrapped_dek_hex` and `key_version` in `.meta`. In CSE mode, stores data as a single chunk (already encrypted by the client).
     - `download(token, file_id, ...)`: Reads all chunks, unwraps each chunk's DEK via `KMS.unwrap_dek()`, decrypts and verifies AAD per chunk, and reassembles the original file.
     - `delete(token, file_id, ...)`: Removes all chunk blobs and the `.meta` file.
-    - `reencrypt_file(token, file_id, ...)`: Re-encrypts all chunks of an SSE file with new DEKs after a key rotation. Decrypts each chunk with the old DEK, generates a new DEK, re-encrypts and overwrites the chunk on disk, and updates `.meta` with the new DEK info.
+    - `reencrypt_file(token, file_id, ...)`: Re-encrypts all chunks of an SSE file with new DEKs after a key rotation. Decrypts each chunk with the old DEK, generates a new DEK, re-encrypts and overwrites the chunk on disk, and updates `.meta` with the new DEK info. If the file is not an SSE file, the function returns `False` to indicate that no action was taken.
 
 ### 3.2 Client (application layer)
 
 - **Location**: `src/secure_cloud_storage/client/service.py`
 - **Main operations:**
     - `rotate_key(token)`: Calls `KMS.rotate_master_key()` to generate a new Master Key version and archive the old one.
-    - `reencrypt_all_files(token)`: Iterates over all personal SSE files and calls `storage.reencrypt_file()` for each one. Returns a summary with reencrypted and failed files.
+    - `reencrypt_all_files(token)`: Iterates over all personal files and calls `storage.reencrypt_file()` for each one. Returns a summary with reencrypted and failed SSE files.
 
 ### 3.3 CLI (Click)
 

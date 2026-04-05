@@ -209,10 +209,9 @@ def rotate_key(ctx: click.Context) -> None:
     click.confirm("Are you sure?", abort=True)
 
     try:
+        app.rotate_key(token)
         click.echo("Re-encrypting files...")
         summary = app.reencrypt_all_files(token)
-
-        app.rotate_key(token)
 
         if summary["reencrypted"]:
             click.echo(f"✅ Re-encrypted {len(summary['reencrypted'])} file(s):")

@@ -98,8 +98,8 @@ def _render_main(app: ClientService) -> None:
     st.sidebar.subheader("🔑 Key Management")
     if st.sidebar.button("🔄 Rotate Master Key"):
         try:
-            summary = app.reencrypt_all_files(token)
             app.rotate_key(token)
+            summary = app.reencrypt_all_files(token)
             if summary["reencrypted"]:
                 st.sidebar.success(f"✅ Re-encrypted {len(summary['reencrypted'])} file(s) and key rotated!")
             else:
