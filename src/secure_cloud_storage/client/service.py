@@ -61,10 +61,8 @@ class ClientService:
             key_version = None
             
             if folder_id:
-                # Carpetas compartidas mantienen su lógica por ahora
                 key = self._kms.get_folder_key(token, folder_id)
             else:
-                # === NEW: Envelope Encryption (CSE Personal) ===
                 user_id = self._kms.get_user_id_for_token(token)
                 raw_dek, wrapped_dek = self._kms.generate_dek(user_id)
                 key_version = self._kms.get_key_version(user_id)
@@ -81,7 +79,6 @@ class ClientService:
                 data = encrypt_bytes(key, data, algorithm, metadata)
             finally:
                 if not folder_id:
-                    # Borrado seguro de la DEK de la memoria
                     secure_zero(bytearray(key))
                     
             self._storage.upload(
@@ -126,8 +123,6 @@ class ClientService:
         folder_id: str | None = None,
     ) -> tuple[bytes, str]:
         """Return (file contents, encryption_mode). Mode is read from file metadata for correct key."""
-        
-        # Ahora el backend devuelve 5 parámetros, incluyendo meta_raw
         data, mode, alg, file, meta_raw = self._storage.download(
             token, file_id, folder_id=folder_id
         )
@@ -136,7 +131,6 @@ class ClientService:
             if folder_id:
                 key = self._kms.get_folder_key(token, folder_id)
             else:
-                # === NEW: Envelope Encryption (CSE Personal) ===
                 user_id = self._kms.get_user_id_for_token(token)
                 wrapped_dek_hex = meta_raw.get("wrapped_dek_hex")
                 key_version = meta_raw.get("key_version")
@@ -159,9 +153,8 @@ class ClientService:
                 )
             finally:
                 if not folder_id:
-                     secure_zero(bytearray(key))
+                    secure_zero(bytearray(key))
 
-            # If it doesnt raise the exception, the file metadata is correct
             file_aad = metadata.get("filename")
             encryp_aad = metadata.get("encryption_mode")
             alg_aad = metadata.get("algorithm_mode")
@@ -221,3 +214,26 @@ class ClientService:
     def remove_member(self, token: str, folder_id: str, username: str) -> None:
         """Remove a member from the shared folder (creator only)."""
         self._kms.remove_member(token, folder_id, username)
+
+    def rotate_key(self, token: str) -> None:
+        """Rotate the user's Master Key in the KMS."""
+        user_id = self._kms.get_user_id_for_token(token)
+        self._kms.rotate_master_key(user_id)
+
+    def reencrypt_all_files(self, token: str) -> dict:
+        """Re-encrypt all SSE files after a key rotation.
+        Returns a summary: {reencrypted: [...], failed: [...]}
+        """
+        summary = {"reencrypted": [], "failed": []}
+
+        for f in self.list_files(token, folder_id=None):
+            file_id = f["file_id"]
+            filename = f.get("filename", file_id)
+            try:
+                isSSE = self._storage.reencrypt_file(token, file_id, folder_id=None)
+                if isSSE:
+                    summary["reencrypted"].append(filename)
+            except Exception as e:
+                summary["failed"].append({"file": filename, "error": str(e)})
+
+        return summary

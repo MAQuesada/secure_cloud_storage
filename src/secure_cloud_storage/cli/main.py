@@ -35,7 +35,6 @@ def _get_app() -> ClientService:
         kms.unlock_kek(admin_password)
     except KMSError as e:
         raise click.ClickException(f"Failed to unlock KMS: {e}")
-    # --------------------------------
         
     storage = StorageBackend(file_bin_dir=FILE_BIN_DIR, kms=kms)
     _app_instance = ClientService(kms=kms, storage=storage)
@@ -43,7 +42,6 @@ def _get_app() -> ClientService:
 
 
 def _read_token() -> str | None:
-    """Read session token from file. Returns None if not logged in."""
     if not SESSION_FILE.is_file():
         return None
     try:
@@ -53,19 +51,16 @@ def _read_token() -> str | None:
 
 
 def _write_token(token: str) -> None:
-    """Persist session token to file."""
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     SESSION_FILE.write_text(token)
 
 
 def _clear_token() -> None:
-    """Remove session file."""
     if SESSION_FILE.is_file():
         SESSION_FILE.unlink()
 
 
 def _require_token(ctx: click.Context) -> str:
-    """Get current token or fail with a message."""
     token = _read_token()
     if not token:
         raise click.ClickException("Not logged in. Run: login <username> <password>")
@@ -73,7 +68,6 @@ def _require_token(ctx: click.Context) -> str:
 
 
 def _get_ctx_obj(ctx: click.Context) -> dict:
-    """Get the root context obj (app, mode) for use in subcommands."""
     root = ctx.find_root()
     return root.obj or {}
 
@@ -204,6 +198,35 @@ def delete(ctx: click.Context, file_id: str, folder_id: str | None) -> None:
         raise click.ClickException(str(e))
 
 
+@cli.command("rotate-key")
+@click.pass_context
+def rotate_key(ctx: click.Context) -> None:
+    """Rotate your Master Key and re-encrypt all SSE files with the new key."""
+    token = _require_token(ctx)
+    app = _get_app()
+
+    click.echo("⚠️  This will rotate your Master Key and re-encrypt all your SSE files.")
+    click.confirm("Are you sure?", abort=True)
+
+    try:
+        app.rotate_key(token)
+        click.echo("Re-encrypting files...")
+        summary = app.reencrypt_all_files(token)
+
+        if summary["reencrypted"]:
+            click.echo(f"✅ Re-encrypted {len(summary['reencrypted'])} file(s):")
+            for name in summary["reencrypted"]:
+                click.echo(f"   - {name}")
+        if summary["failed"]:
+            click.echo(f"❌ Failed {len(summary['failed'])} file(s):")
+            for f in summary["failed"]:
+                click.echo(f"   - {f['file']}: {f['error']}")
+
+        click.echo("✅ Key rotation complete.")
+    except (KMSError, StorageError) as e:
+        raise click.ClickException(str(e))
+
+
 @cli.group()
 def shared() -> None:
     """Shared folder commands: create, list, invite."""
@@ -261,7 +284,7 @@ def shared_set_name(ctx: click.Context, folder_id: str, name: str) -> None:
 @click.argument("username", type=str)
 @click.pass_context
 def shared_invite(ctx: click.Context, folder_id: str, username: str) -> None:
-    """Invite a user to the shared folder by username. They must run 'shared accept' to get access."""
+    """Invite a user to the shared folder by username."""
     token = _require_token(ctx)
     app = _get_app()
     try:
@@ -338,23 +361,23 @@ def help_cmd() -> None:
     click.echo("Secure Cloud Storage — CLI")
     click.echo("  --mode cse | sse   Encryption mode (default: cse)")
     click.echo("  --alg aesgcm | chacha20 | fernet   Encryption algorithm (default: aesgcm)")
-    click.echo("  register <user> <pass>   Register and log in")
-    click.echo("  login <user> <pass>       Log in")
-    click.echo("  logout                   Clear session")
-    click.echo("  list [--folder <id>]      List files")
+    click.echo("  register <user>   Register and log in")
+    click.echo("  login <user>      Log in")
+    click.echo("  logout            Clear session")
+    click.echo("  list [--folder <id>]   List files")
     click.echo("  upload <path> [--folder <id>]   Upload file")
     click.echo("  download <file_id> [-o <path>] [--folder <id>]   Download file")
     click.echo("  delete <file_id> [--folder <id>]   Delete file")
-    click.echo("  shared create [--name <name>]   Create shared folder (optional name)")
-    click.echo("  shared list                    List your shared folders (id + name)")
+    click.echo("  rotate-key        Rotate Master Key and re-encrypt all SSE files")
+    click.echo("  shared create [--name <name>]   Create shared folder")
+    click.echo("  shared list       List your shared folders")
     click.echo("  shared set-name <folder_id> <name>   Rename a shared folder")
-    click.echo("  shared invite <folder_id> <username>   Invite user by username")
-    click.echo("  shared accept <folder_id>              Accept an invite (immediate access)")
-    click.echo("  shared pending                         List pending invites")
-    click.echo("  shared members <folder_id>            List folder members")
-    click.echo("  shared remove-member <folder_id> <username>   Remove member (creator only)")
-    click.echo("  help                     This message")
+    click.echo("  shared invite <folder_id> <username>   Invite user")
+    click.echo("  shared accept <folder_id>   Accept an invite")
+    click.echo("  shared pending    List pending invites")
+    click.echo("  shared members <folder_id>   List folder members")
+    click.echo("  shared remove-member <folder_id> <username>   Remove member")
+    click.echo("  help              This message")
 
 
-# Alias "help" to the command (Click reserves "help" for --help)
 cli.add_command(help_cmd, "help")

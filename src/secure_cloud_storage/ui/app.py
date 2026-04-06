@@ -21,13 +21,11 @@ def _get_app(admin_password: str | None = None) -> ClientService:
     # Unlock the KMS with the provided password.
     if admin_password:
         kms.unlock_kek(admin_password)
-        
     storage = StorageBackend(file_bin_dir=FILE_BIN_DIR, kms=kms)
     return ClientService(kms=kms, storage=storage)
 
 
 def _init_session() -> None:
-    # Token only in session_state (no file): each browser tab has its own user; multiple sessions allowed.
     if "token" not in st.session_state:
         st.session_state.token = None
     if "mode" not in st.session_state:
@@ -95,6 +93,22 @@ def _render_main(app: ClientService) -> None:
         st.session_state.token = None
         st.rerun()
 
+    # === KEY MANAGEMENT ===
+    st.sidebar.divider()
+    st.sidebar.subheader("🔑 Key Management")
+    if st.sidebar.button("🔄 Rotate Master Key"):
+        try:
+            app.rotate_key(token)
+            summary = app.reencrypt_all_files(token)
+            if summary["reencrypted"]:
+                st.sidebar.success(f"✅ Re-encrypted {len(summary['reencrypted'])} file(s) and key rotated!")
+            else:
+                st.sidebar.success("✅ Key rotated (no SSE files to re-encrypt).")
+            if summary["failed"]:
+                st.sidebar.error(f"❌ Failed: {[f['file'] for f in summary['failed']]}")
+        except Exception as e:
+            st.sidebar.error(str(e))
+
     # Shared folder selector
     try:
         shared_folders = app.list_shared_folders(token)
@@ -142,7 +156,6 @@ def _render_main(app: ClientService) -> None:
                 st.text(f"{f['filename']} ({f['file_id']}) [{file_mode.upper()}]")
             with col2:
                 if st.button("Prepare download", key=f"predl_{f['file_id']}"):
-                    # It is created the button after touch it, because you can download fine a file although is has been changed
                     try:
                         data, used_mode = app.get_file_bytes(
                             token, f["file_id"], folder_id=folder_id
@@ -197,7 +210,6 @@ def _render_main(app: ClientService) -> None:
 
     st.sidebar.divider()
     st.sidebar.subheader("Shared folders")
-    # Create shared folder: optional name
     create_name = st.sidebar.text_input(
         "New folder name (optional)",
         key="create_folder_name",
@@ -296,6 +308,7 @@ def _render_main(app: ClientService) -> None:
                             st.rerun()
                         except KMSError as e:
                             st.error(str(e))
+
     with st.sidebar.expander("Rename shared folder"):
         if not shared_folders:
             st.caption("No shared folders.")
